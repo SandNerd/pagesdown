@@ -115,7 +115,14 @@ function pagePropertyToText(prop) {
           .join(', ');
       }
       case 'relation':
-        return Array.isArray(prop.relation) ? prop.relation.map((r) => r?.id).filter(Boolean).join(', ') : '';
+        // Relation values are usually opaque IDs; include a hint for LLM readability.
+        return Array.isArray(prop.relation)
+          ? prop.relation
+            .map((r) => r?.id)
+            .filter(Boolean)
+            .map((id) => `${id} (relation)`)
+            .join(', ')
+          : '';
       case 'formula': {
         const f = prop.formula;
         if (!f) return '';
@@ -284,7 +291,7 @@ function assembleMarkdown(convertedParts, childResults = new Map()) {
   return markdown;
 }
 
-async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors) {
+async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors, assetsDirForFlatChildren) {
   const parts = [];
   let current = [];
 
@@ -302,7 +309,7 @@ async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors) 
       await flush();
       const resolved = await resolveSyncedBlockChildren(block, ctx, titleForErrors);
       if (resolved.length > 0) {
-        const nested = await blocksToInlineParts(resolved, ctx, visited, depth + 1, titleForErrors);
+        const nested = await blocksToInlineParts(resolved, ctx, visited, depth + 1, titleForErrors, assetsDirForFlatChildren);
         parts.push(...nested);
       }
       continue;
@@ -340,15 +347,27 @@ async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors) 
         continue;
       }
 
-      const childParts = await blocksToInlineParts(childBlocks, ctx, visited, depth + 1, childTitle);
+      const childParts = await blocksToInlineParts(childBlocks, ctx, visited, depth + 1, childTitle, assetsDirForFlatChildren);
       const converted = await convertBlockParts(childParts, ctx.n2m, childTitle, ctx.stats, ctx.onError);
-      const childMarkdown = normalizeSpacing(assembleMarkdown(converted, new Map())).trim();
+      let childMarkdown = normalizeSpacing(assembleMarkdown(converted, new Map())).trim();
+
+      // In flat mode, still download/rewire assets for inlined sub-pages.
+      // Assets are stored under the current page's directory (same output file context).
+      try {
+        if (assetsDirForFlatChildren) {
+          const processed = await processAssets(childMarkdown, assetsDirForFlatChildren, ctx.stats, ctx);
+          childMarkdown = normalizeSpacing(processed).trim();
+        }
+      } catch (err) {
+        ctx.stats.errors.push({ title: childTitle, error: `Asset processing failed: ${err.message}` });
+        ctx.onError(`Asset processing failed in ${childTitle} — ${err.message}`);
+      }
 
       const wrapped =
-        '```markdown\n' +
+        `<!-- pagesdown:subpage:start -->\n` +
         `### Sub-Page Content: ${childTitle}\n\n` +
-        (childMarkdown ? `${childMarkdown}\n` : '') +
-        '```\n\n';
+        (childMarkdown ? `${childMarkdown}\n\n` : '') +
+        `<!-- pagesdown:subpage:end -->\n\n`;
 
       parts.push({ type: 'raw', content: wrapped });
       continue;
@@ -474,7 +493,9 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
   let childEntries;
 
   if (ctx.flat) {
-    markdownParts = await blocksToInlineParts(blocks, ctx, visited, depth, name);
+    // In flat mode, assets for this whole document (and any inlined sub-pages)
+    // should live alongside the single output markdown file.
+    markdownParts = await blocksToInlineParts(blocks, ctx, visited, depth, name, parentDir);
     childEntries = [];
   } else {
     // Legacy behavior for child_page: split into links + recurse.
@@ -563,9 +584,9 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
     markdown = `# ${name}\n`;
   }
 
-  if (!isLeaf && !ctx.flat) {
-    markdown = await processAssets(markdown, pageDir, stats, ctx);
-  }
+  // Even in flat mode we want to download/rewire assets so the final single file
+  // doesn't contain expiring external URLs.
+  markdown = await processAssets(markdown, pageDir, stats, ctx);
 
   await writeFile(mdPath, markdown, 'utf-8');
   stats.totalPages++;

@@ -146,14 +146,14 @@ When `--flat` is enabled:
 
 - **No sub‑page folders/files** are created for `child_page` blocks.
 - Instead, each sub‑page is **fully downloaded and rendered inline** into the parent document.
-- The inlined sub‑page is wrapped with explicit markers so LLMs can see context shifts clearly:
+- The inlined sub‑page is wrapped with explicit markers so LLMs can see context shifts clearly (and so nested code blocks can’t accidentally break the parent document):
 
-```markdown
-```markdown
+```text
+<!-- pagesdown:subpage:start -->
 ### Sub-Page Content: Your Sub-Page Title
 
 <Rendered Markdown content of the sub-page...>
-```
+<!-- pagesdown:subpage:end -->
 ```
 
 This preserves structure but keeps everything in a single file that’s easy to feed to an LLM.
