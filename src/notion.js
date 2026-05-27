@@ -251,6 +251,15 @@ export class NotionClient {
   }
 
   /**
+   * Retrieve a database's metadata/properties schema.
+   */
+  async getDatabase(databaseId) {
+    return this._throttledCall(() =>
+      this.client.databases.retrieve({ database_id: databaseId })
+    );
+  }
+
+  /**
    * Retrieve a single page's properties.
    */
   async getPage(pageId) {

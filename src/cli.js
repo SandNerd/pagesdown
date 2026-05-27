@@ -30,7 +30,16 @@ const BANNER = `
 ╚═════╝  ╚═════╝  ╚══╝╚══╝ ╚═╝  ╚═══╝
 `;
 
+function parseArgs(argv) {
+  const out = { flat: false };
+  for (const a of argv) {
+    if (a === '--flat' || a === '-f') out.flat = true;
+  }
+  return out;
+}
+
 async function main() {
+  const args = parseArgs(process.argv.slice(2));
   console.log(BANNER);
   p.intro('pagesdown v0.1.2');
 
@@ -282,7 +291,7 @@ async function main() {
       p.log.warn(message);
       spin.start('Continuing...');
     },
-  });
+  }, { flat: args.flat });
 
   spin.stop(`${stats.totalPages} page${stats.totalPages === 1 ? '' : 's'}, ${stats.totalAssets} asset${stats.totalAssets === 1 ? '' : 's'} downloaded.`);
 

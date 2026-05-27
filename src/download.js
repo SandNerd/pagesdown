@@ -62,6 +62,162 @@ function hasExternalImages(markdown) {
   return /!\[[^\]]*\]\(https?:\/\/[^)]+\)/.test(markdown);
 }
 
+function normalizeSpacing(md) {
+  if (!md) return '';
+  // Prevent accidental triple-blank-lines from mixed sources.
+  return md.replace(/\n{3,}/g, '\n\n');
+}
+
+function escapeTableCell(text) {
+  if (text === null || text === undefined) return '';
+  return String(text).replace(/\|/g, '\\|').replace(/\n/g, '<br>');
+}
+
+function notionRichTextToPlain(richText) {
+  if (!Array.isArray(richText) || richText.length === 0) return '';
+  return richText.map((t) => t.plain_text || '').join('');
+}
+
+function pagePropertyToText(prop) {
+  if (!prop || typeof prop !== 'object') return '';
+  try {
+    switch (prop.type) {
+      case 'title':
+        return notionRichTextToPlain(prop.title);
+      case 'rich_text':
+        return notionRichTextToPlain(prop.rich_text);
+      case 'number':
+        return prop.number === null || prop.number === undefined ? '' : String(prop.number);
+      case 'select':
+        return prop.select?.name || '';
+      case 'multi_select':
+        return Array.isArray(prop.multi_select) ? prop.multi_select.map((s) => s?.name).filter(Boolean).join(', ') : '';
+      case 'status':
+        return prop.status?.name || '';
+      case 'date':
+        if (!prop.date) return '';
+        return prop.date.end ? `${prop.date.start} → ${prop.date.end}` : prop.date.start;
+      case 'checkbox':
+        return prop.checkbox ? 'true' : 'false';
+      case 'url':
+        return prop.url || '';
+      case 'email':
+        return prop.email || '';
+      case 'phone_number':
+        return prop.phone_number || '';
+      case 'people':
+        return Array.isArray(prop.people) ? prop.people.map((p) => p?.name).filter(Boolean).join(', ') : '';
+      case 'files': {
+        if (!Array.isArray(prop.files) || prop.files.length === 0) return '';
+        return prop.files
+          .map((f) => f?.name || f?.file?.url || f?.external?.url)
+          .filter(Boolean)
+          .join(', ');
+      }
+      case 'relation':
+        return Array.isArray(prop.relation) ? prop.relation.map((r) => r?.id).filter(Boolean).join(', ') : '';
+      case 'formula': {
+        const f = prop.formula;
+        if (!f) return '';
+        if (f.type === 'string') return f.string || '';
+        if (f.type === 'number') return f.number === null || f.number === undefined ? '' : String(f.number);
+        if (f.type === 'boolean') return f.boolean ? 'true' : 'false';
+        if (f.type === 'date') return f.date?.start || '';
+        return '';
+      }
+      case 'rollup': {
+        const r = prop.rollup;
+        if (!r) return '';
+        if (r.type === 'number') return r.number === null || r.number === undefined ? '' : String(r.number);
+        if (r.type === 'date') return r.date?.start || '';
+        if (r.type === 'array') return Array.isArray(r.array) ? r.array.map((it) => pagePropertyToText(it)).filter(Boolean).join(', ') : '';
+        return '';
+      }
+      default:
+        return '';
+    }
+  } catch {
+    return '';
+  }
+}
+
+async function childDatabaseToMarkdownTable(block, ctx, titleForErrors) {
+  const databaseId = block?.id;
+  if (!databaseId) return '';
+
+  const { notion, stats, onError } = ctx;
+
+  let db;
+  try {
+    db = await notion.getDatabase(databaseId);
+  } catch (err) {
+    stats.errors.push({ title: titleForErrors, error: `Could not retrieve database schema: ${err.message}` });
+    onError(`Could not retrieve database schema in ${titleForErrors} — ${err.message}`);
+    return '';
+  }
+
+  let rows;
+  try {
+    rows = await notion.queryDatabase(databaseId);
+  } catch (err) {
+    stats.errors.push({ title: titleForErrors, error: `Could not query database: ${err.message}` });
+    onError(`Could not query database in ${titleForErrors} — ${err.message}`);
+    return '';
+  }
+
+  const props = db?.properties && typeof db.properties === 'object' ? db.properties : {};
+
+  // Keep Notion's property order as returned; also include Title first if present.
+  const propEntries = Object.entries(props);
+  const titleProp = propEntries.find(([, p]) => p?.type === 'title');
+  const otherProps = propEntries.filter(([, p]) => p?.type !== 'title');
+  const ordered = titleProp ? [titleProp, ...otherProps] : otherProps;
+
+  const colNames = ordered.map(([name]) => name);
+  if (colNames.length === 0) return '';
+
+  const header = `| ${colNames.map(escapeTableCell).join(' | ')} |`;
+  const divider = `| ${colNames.map(() => '---').join(' | ')} |`;
+  const bodyLines = [];
+
+  for (const page of rows) {
+    const pageProps = page?.properties && typeof page.properties === 'object' ? page.properties : {};
+    const cells = ordered.map(([name]) => escapeTableCell(pagePropertyToText(pageProps[name])));
+    bodyLines.push(`| ${cells.join(' | ')} |`);
+  }
+
+  const title = block?.child_database?.title || db?.title?.map((t) => t.plain_text).join('') || 'Database';
+  const out = [`\n\n### ${title}\n\n`, header, divider, ...bodyLines, '\n\n'].join('\n');
+  return normalizeSpacing(out);
+}
+
+async function resolveSyncedBlockChildren(block, ctx, titleForErrors) {
+  const { notion, stats, onError } = ctx;
+  const synced = block?.synced_block;
+  if (!synced) return [];
+
+  if (!synced.synced_from) {
+    // Original synced block, its children should already be inlined by deep fetch.
+    return Array.isArray(block.children) ? block.children : [];
+  }
+
+  const targetId = synced.synced_from?.block_id;
+  if (!targetId) return [];
+
+  try {
+    const result = await notion.getBlockChildrenDeep(targetId);
+    for (const w of result.warnings) {
+      stats.errors.push({ title: titleForErrors, error: `Skipped block ${w.blockType}: ${w.error}` });
+      onError(`Partial fetch in ${titleForErrors}: skipped ${w.blockType} block — ${w.error}`);
+    }
+    return result.blocks || [];
+  } catch (err) {
+    stats.errors.push({ title: titleForErrors, error: `Could not resolve synced block: ${err.message}` });
+    onError(`Could not resolve synced block in ${titleForErrors} — ${err.message}`);
+    return [];
+  }
+}
+
 /**
  * Convert block segments in markdownParts to markdown strings (one pass).
  * Returns an array mirroring markdownParts where block entries have a `content`
@@ -73,11 +229,13 @@ async function convertBlockParts(markdownParts, n2m, titleForErrors, stats, onEr
   for (const part of markdownParts) {
     if (part.type === 'link') {
       converted.push(part);
+    } else if (part.type === 'raw') {
+      converted.push(part);
     } else {
       try {
         const mdBlocks = await n2m.blocksToMarkdown(part.blocks);
         const mdResult = n2m.toMarkdownString(mdBlocks);
-        converted.push({ type: 'blocks', content: mdResult.parent || '' });
+        converted.push({ type: 'blocks', content: normalizeSpacing(mdResult.parent || '') });
       } catch (err) {
         stats.errors.push({ title: titleForErrors, error: `Markdown conversion failed: ${err.message}` });
         onError(`Conversion failed for segment in ${titleForErrors}: ${err.message}`);
@@ -104,6 +262,14 @@ function assembleMarkdown(convertedParts, childResults = new Map()) {
         ? `./${part.name}.md`
         : `./${part.name}/${part.name}.md`;
       markdown += `- [${part.title}](${relativePath})\n`;
+    } else if (part.type === 'raw') {
+      const segment = part.content || '';
+      if (segment.trim()) {
+        markdown += normalizeSpacing(segment);
+        if (!markdown.endsWith('\n\n')) {
+          markdown += '\n';
+        }
+      }
     } else {
       const segment = part.content;
       if (segment.trim()) {
@@ -118,6 +284,90 @@ function assembleMarkdown(convertedParts, childResults = new Map()) {
   return markdown;
 }
 
+async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors) {
+  const parts = [];
+  let current = [];
+
+  async function flush() {
+    if (current.length > 0) {
+      parts.push({ type: 'blocks', blocks: current });
+      current = [];
+    }
+  }
+
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue;
+
+    if (block.type === 'synced_block') {
+      await flush();
+      const resolved = await resolveSyncedBlockChildren(block, ctx, titleForErrors);
+      if (resolved.length > 0) {
+        const nested = await blocksToInlineParts(resolved, ctx, visited, depth + 1, titleForErrors);
+        parts.push(...nested);
+      }
+      continue;
+    }
+
+    if (block.type === 'child_database') {
+      await flush();
+      const table = await childDatabaseToMarkdownTable(block, ctx, titleForErrors);
+      if (table.trim()) parts.push({ type: 'raw', content: table });
+      continue;
+    }
+
+    if (block.type === 'child_page' && ctx.flat) {
+      await flush();
+
+      const childPageId = block.id;
+      const childTitle = block.child_page?.title || 'Untitled';
+
+      if (!childPageId) continue;
+      if (visited.has(childPageId)) continue;
+
+      visited.add(childPageId);
+
+      let childBlocks = [];
+      try {
+        const result = await ctx.notion.getBlockChildrenDeep(childPageId);
+        childBlocks = result.blocks;
+        for (const w of result.warnings) {
+          ctx.stats.errors.push({ title: childTitle, error: `Skipped block ${w.blockType}: ${w.error}` });
+          ctx.onError(`Partial fetch in ${childTitle}: skipped ${w.blockType} block — ${w.error}`);
+        }
+      } catch (err) {
+        ctx.stats.errors.push({ title: childTitle, error: `Could not fetch blocks: ${err.message}` });
+        ctx.onError(`Could not fetch: ${childTitle} — ${err.message}`);
+        continue;
+      }
+
+      const childParts = await blocksToInlineParts(childBlocks, ctx, visited, depth + 1, childTitle);
+      const converted = await convertBlockParts(childParts, ctx.n2m, childTitle, ctx.stats, ctx.onError);
+      const childMarkdown = normalizeSpacing(assembleMarkdown(converted, new Map())).trim();
+
+      const wrapped =
+        '```markdown\n' +
+        `### Sub-Page Content: ${childTitle}\n\n` +
+        (childMarkdown ? `${childMarkdown}\n` : '') +
+        '```\n\n';
+
+      parts.push({ type: 'raw', content: wrapped });
+      continue;
+    }
+
+    if (block.type === 'child_page' && !ctx.flat) {
+      // Keep legacy behavior: split out a link + recursion.
+      // This is handled by the existing boundary splitter.
+      current.push(block);
+      continue;
+    }
+
+    current.push(block);
+  }
+
+  await flush();
+  return parts;
+}
+
 /**
  * Download selected pages/databases to the local filesystem.
  *
@@ -126,7 +376,7 @@ function assembleMarkdown(convertedParts, childResults = new Map()) {
  *   onLog(message)     – milestone log line (page saved, db started, etc.)
  *   onError(message)   – error log line (shown immediately, not batched)
  */
-export async function downloadPages(selectedItems, savePath, notion, { onStatus, onLog, onError }) {
+export async function downloadPages(selectedItems, savePath, notion, { onStatus, onLog, onError }, { flat = false } = {}) {
   await ensureDir(savePath);
 
   const n2m = new NotionToMarkdown({
@@ -138,7 +388,7 @@ export async function downloadPages(selectedItems, savePath, notion, { onStatus,
   });
 
   const stats = { totalPages: 0, totalAssets: 0, errors: [] };
-  const ctx = { notion, n2m, stats, onStatus, onLog, onError };
+  const ctx = { notion, n2m, stats, onStatus, onLog, onError, flat };
   const usedNames = new Set();
   const visited = new Set();
 
@@ -220,7 +470,36 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
 
   onStatus(`Converting: ${name} (${blocks.length} blocks)`);
 
-  const { markdownParts, childEntries } = splitBlocksAtBoundaries(blocks);
+  let markdownParts;
+  let childEntries;
+
+  if (ctx.flat) {
+    markdownParts = await blocksToInlineParts(blocks, ctx, visited, depth, name);
+    childEntries = [];
+  } else {
+    // Legacy behavior for child_page: split into links + recurse.
+    // But child_database is now rendered inline, so we post-process segments.
+    const boundary = splitBlocksAtBoundaries(blocks);
+    childEntries = boundary.childEntries.filter((e) => e.type !== 'database');
+
+    // Convert any child_database "link" parts into inline tables.
+    markdownParts = [];
+    for (const part of boundary.markdownParts) {
+      if (part.type === 'link') {
+        const matchingDb = boundary.childEntries.find((e) => e.type === 'database' && e.name === part.name);
+        if (matchingDb) {
+          const table = await childDatabaseToMarkdownTable(matchingDb.block, ctx, name);
+          if (table.trim()) markdownParts.push({ type: 'raw', content: table });
+          continue;
+        }
+        markdownParts.push(part);
+      } else {
+        // Expand synced blocks inside each segment without breaking link boundaries.
+        const expanded = await blocksToInlineParts(part.blocks, ctx, visited, depth, name);
+        markdownParts.push(...expanded);
+      }
+    }
+  }
 
   // Convert block segments once (avoids double conversion)
   const convertedParts = await convertBlockParts(markdownParts, n2m, name, stats, onError);
@@ -238,7 +517,11 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
 
   // Decide directory structure
   let pageDir, mdPath;
-  if (isLeaf) {
+  if (ctx.flat) {
+    // Flat mode always writes a single markdown file at parentDir level.
+    mdPath = path.join(parentDir, `${name}.md`);
+    pageDir = parentDir;
+  } else if (isLeaf) {
     mdPath = path.join(parentDir, `${name}.md`);
     pageDir = parentDir;
   } else {
@@ -249,25 +532,27 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
 
   // Recurse into children BEFORE writing parent (to get leaf status for links)
   const childResults = new Map();
-  if (childEntries.length > 0) {
+  if (!ctx.flat && childEntries.length > 0) {
     const pageCount = childEntries.filter((e) => e.type === 'page').length;
     const dbCount = childEntries.filter((e) => e.type === 'database').length;
     onStatus(`${name}: ${pageCount} sub-pages, ${dbCount} sub-databases`);
   }
 
-  for (const entry of childEntries) {
-    try {
-      let result;
-      if (entry.type === 'page') {
-        result = await downloadPage(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
-      } else {
-        result = await downloadDatabase(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
+  if (!ctx.flat) {
+    for (const entry of childEntries) {
+      try {
+        let result;
+        if (entry.type === 'page') {
+          result = await downloadPage(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
+        } else {
+          result = await downloadDatabase(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
+        }
+        childResults.set(entry.name, result || { isLeaf: false });
+      } catch (err) {
+        stats.errors.push({ title: entry.title, error: err.message });
+        onError(`Failed: ${entry.title} — ${err.message}`);
+        childResults.set(entry.name, { isLeaf: false });
       }
-      childResults.set(entry.name, result || { isLeaf: false });
-    } catch (err) {
-      stats.errors.push({ title: entry.title, error: err.message });
-      onError(`Failed: ${entry.title} — ${err.message}`);
-      childResults.set(entry.name, { isLeaf: false });
     }
   }
 
@@ -278,7 +563,7 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
     markdown = `# ${name}\n`;
   }
 
-  if (!isLeaf) {
+  if (!isLeaf && !ctx.flat) {
     markdown = await processAssets(markdown, pageDir, stats, ctx);
   }
 
