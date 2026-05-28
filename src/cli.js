@@ -1,6 +1,7 @@
 import * as p from '@clack/prompts';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { NotionClient, extractTitle } from './notion.js';
 import { loadConfig, saveConfig } from './config.js';
 import { getSaveLocationOptions, isWritablePath } from './utils.js';
@@ -44,7 +45,7 @@ const BANNER = `
 `;
 
 function parseArgs(argv) {
-  const out = { flat: false, id: null, out: null, help: false, token: null };
+  const out = { flat: false, id: null, out: null, help: false, token: null, idClip: false };
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -52,11 +53,17 @@ function parseArgs(argv) {
     else if (a === '--help' || a === '-h') out.help = true;
     else if (a === '--id' || a === '-i') {
       const raw = argv[i + 1];
-      out.id = extractNotionId(raw);
+      // Support reading the id/url from stdin by passing '-' after --id
+      out.id = raw === '-' ? '-' : extractNotionId(raw);
       i += 1;
     } else if (a === '--out' || a === '-o') {
       out.out = argv[i + 1];
       i += 1;
+    } else if (a === '--set-default-out') {
+      out.setDefaultOut = argv[i + 1];
+      i += 1;
+    } else if (a === '--id-clip') {
+      out.idClip = true;
     } else if (a === '--token' || a === '-t') {
       out.token = argv[i + 1];
       i += 1;
@@ -74,11 +81,43 @@ async function main() {
       '',
       'Options:',
       '  -i, --id <id-or-url>  Specify an explicit Notion Page/Database UUID or full Share Link',
-      '  -f, --flat            Enable unified single-file context layout mode',
+      '                       Use "-" to read the id/url from stdin (pipe/echo)',
+      '                       Use "--id-clip" to read the URL from the clipboard (macOS pbpaste)',
+      '  -f, --flat            Enable unified single-file layout (optimized: sparse tables, internal anchors)',
       '  -o, --out <path>      Specify a custom local directory output path (default: current directory)',
+      '      --set-default-out <path>  Set and save the global default output directory and exit',
+      '  -t, --token <token>   Set and save a Notion integration token',
       '  -h, --help            Show this help information',
     ].join('\n'));
     process.exit(0);
+  }
+  
+  // If the user asked to read the id/url from stdin (pipe/echo), do that now.
+  if (args.id === '-') {
+    // Read all stdin
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const input = Buffer.concat(chunks).toString('utf8').trim();
+    if (!input) {
+      p.log.error('No input received on stdin for --id.');
+      process.exit(1);
+    }
+    args.id = extractNotionId(input);
+  }
+
+  // If requested, read the id/url from the system clipboard (macOS)
+  if (args.idClip) {
+    try {
+      const clip = execSync('pbpaste', { encoding: 'utf8' }).toString().trim();
+      if (!clip) {
+        p.log.error('Clipboard is empty.');
+        process.exit(1);
+      }
+      args.id = extractNotionId(clip);
+    } catch (err) {
+      p.log.error(`Failed to read clipboard: ${err.message}`);
+      process.exit(1);
+    }
   }
   console.log(BANNER);
   p.intro('pagesdown v0.1.2');
@@ -88,6 +127,25 @@ async function main() {
   let workspaceName = null;
 
   const savedConfig = await loadConfig();
+
+  // If the user requested to set the default output directory via CLI, handle it now and exit.
+  if (args.setDefaultOut) {
+    const resolved = path.resolve(args.setDefaultOut);
+    if (!(await isWritablePath(resolved))) {
+      p.log.error(`Cannot write to "${resolved}". Check that the folder exists and you have permission.`);
+      process.exit(1);
+    }
+
+    try {
+      const newConfig = Object.assign({}, savedConfig || {}, { defaultOutputDir: resolved });
+      await saveConfig(newConfig);
+      p.log.success(`Saved default output directory to ~/.pagesdown/config.json: ${resolved}`);
+      process.exit(0);
+    } catch (err) {
+      p.log.error(`Failed to save config: ${err.message}`);
+      process.exit(1);
+    }
+  }
 
   // If user supplied a new token via CLI flag, prefer and save it (after validation)
   let tokenSavedViaFlag = false;
@@ -162,7 +220,7 @@ async function main() {
     }
 
     // Resolve output path
-    const savePath = path.resolve(args.out || process.cwd());
+    const savePath = path.resolve(args.out || savedConfig?.defaultOutputDir || process.cwd());
 
     if (!(await isWritablePath(savePath))) {
       p.log.error(`Cannot write to "${savePath}". Check that the folder exists and you have permission.`);
@@ -390,6 +448,28 @@ async function main() {
   if (!(await isWritablePath(savePath))) {
     p.log.error(`Cannot write to "${savePath}". Check that the folder exists and you have permission.`);
     process.exit(1);
+  }
+
+  // Ask if user wants to set this as default for future headless exports
+  if (locationChoice === 'custom' || !locationOptions.some(opt => opt.value === savePath)) {
+    const setAsDefault = exitIfCancelled(
+      await p.confirm({
+        message: 'Would you like to set this path as your global default for future headless exports?',
+      })
+    );
+
+    if (setAsDefault) {
+      try {
+        await saveConfig({
+          token: token || savedConfig?.token,
+          workspace: workspaceName || savedConfig?.workspace,
+          defaultOutputDir: savePath,
+        });
+        p.log.success(`Default output path saved: ${savePath}`);
+      } catch {
+        p.log.warn('Failed to save default path to config file.');
+      }
+    }
   }
 
   // Inform user about merge behavior if directory exists

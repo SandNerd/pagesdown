@@ -1,7 +1,7 @@
 import { NotionToMarkdown } from 'notion-to-md';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { sanitizeFilename, uniqueFilename, ensureDir } from './utils.js';
+import { sanitizeFilename, slugifyFilename, uniqueFilename, ensureDir } from './utils.js';
 import { extractTitle } from './notion.js';
 
 const MAX_DEPTH = 20;
@@ -178,7 +178,23 @@ async function childDatabaseToMarkdownTable(block, ctx, titleForErrors) {
   const propEntries = Object.entries(props);
   const titleProp = propEntries.find(([, p]) => p?.type === 'title');
   const otherProps = propEntries.filter(([, p]) => p?.type !== 'title');
-  const ordered = titleProp ? [titleProp, ...otherProps] : otherProps;
+  let ordered = titleProp ? [titleProp, ...otherProps] : otherProps;
+
+  // Sparse column pruning: only keep columns with non-empty data
+  const hasNonEmptyData = new Set();
+  for (const page of rows) {
+    const pageProps = page?.properties && typeof page.properties === 'object' ? page.properties : {};
+    for (const [propName] of ordered) {
+      const text = escapeTableCell(pagePropertyToText(pageProps[propName]));
+      if (text.trim()) {
+        hasNonEmptyData.add(propName);
+      }
+    }
+  }
+  // Filter to only columns with data (or keep all if no data found, for structure)
+  if (hasNonEmptyData.size > 0) {
+    ordered = ordered.filter(([propName]) => hasNonEmptyData.has(propName));
+  }
 
   const colNames = ordered.map(([name]) => name);
   if (colNames.length === 0) return '';
@@ -363,8 +379,15 @@ async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors, 
         ctx.onError(`Asset processing failed in ${childTitle} — ${err.message}`);
       }
 
+      // Track anchor for this inlined sub-page (sanitize title to slug format)
+      const sanitizedSlug = childTitle.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      const anchorId = `#sub-page-${sanitizedSlug}`;
+      if (ctx.anchorMap) {
+        ctx.anchorMap.set(childPageId, anchorId);
+      }
+
       const wrapped =
-        `<!-- pagesdown:subpage:start -->\n` +
+        `<!-- pagesdown:subpage:start -->${anchorId}\n` +
         `### Sub-Page Content: ${childTitle}\n\n` +
         (childMarkdown ? `${childMarkdown}\n\n` : '') +
         `<!-- pagesdown:subpage:end -->\n\n`;
@@ -407,7 +430,8 @@ export async function downloadPages(selectedItems, savePath, notion, { onStatus,
   });
 
   const stats = { totalPages: 0, totalAssets: 0, errors: [] };
-  const ctx = { notion, n2m, stats, onStatus, onLog, onError, flat };
+  const anchorMap = flat ? new Map() : null; // Track page IDs to anchor slugs in flat mode
+  const ctx = { notion, n2m, stats, onStatus, onLog, onError, flat, anchorMap };
   const usedNames = new Set();
   const visited = new Set();
 
@@ -537,18 +561,19 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
   const isLeaf = !isTopLevel && childEntries.length === 0 && !hasImages;
 
   // Decide directory structure
+  const slugName = slugifyFilename(name);
   let pageDir, mdPath;
   if (ctx.flat) {
     // Flat mode always writes a single markdown file at parentDir level.
-    mdPath = path.join(parentDir, `${name}.md`);
+    mdPath = path.join(parentDir, `${slugName}.md`);
     pageDir = parentDir;
   } else if (isLeaf) {
-    mdPath = path.join(parentDir, `${name}.md`);
+    mdPath = path.join(parentDir, `${slugName}.md`);
     pageDir = parentDir;
   } else {
-    pageDir = path.join(parentDir, name);
+    pageDir = path.join(parentDir, slugName);
     await ensureDir(pageDir);
-    mdPath = path.join(pageDir, `${name}.md`);
+    mdPath = path.join(pageDir, `${slugName}.md`);
   }
 
   // Recurse into children BEFORE writing parent (to get leaf status for links)
@@ -588,6 +613,16 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
   // doesn't contain expiring external URLs.
   markdown = await processAssets(markdown, pageDir, stats, ctx);
 
+  // In flat mode, rewrite internal links to inlined sub-pages to use anchor references
+  if (ctx.flat && ctx.anchorMap && ctx.anchorMap.size > 0) {
+    // Rewrite markdown links [text](pageId) or [text](pageId.md) to anchor references
+    for (const [pageId, anchor] of ctx.anchorMap.entries()) {
+      // Match both bare IDs and ID.md format
+      const idRegex = new RegExp(`\\]\\(${pageId}(?:\\.md)?\\)`, 'g');
+      markdown = markdown.replace(idRegex, `](${anchor})`);
+    }
+  }
+
   await writeFile(mdPath, markdown, 'utf-8');
   stats.totalPages++;
 
@@ -606,7 +641,8 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
   visited.add(databaseId);
 
   const { notion, n2m, stats, onStatus, onLog, onError } = ctx;
-  const dbDir = path.join(parentDir, name);
+  const slugName = slugifyFilename(name);
+  const dbDir = path.join(parentDir, slugName);
   await ensureDir(dbDir);
 
   onStatus(`Querying database: ${name}`);
