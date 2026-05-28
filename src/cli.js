@@ -1,7 +1,7 @@
 import * as p from '@clack/prompts';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { NotionClient } from './notion.js';
+import { NotionClient, extractTitle } from './notion.js';
 import { loadConfig, saveConfig } from './config.js';
 import { getSaveLocationOptions, isWritablePath } from './utils.js';
 import { downloadPages } from './download.js';
@@ -13,6 +13,19 @@ function exitIfCancelled(value) {
     process.exit(0);
   }
   return value;
+}
+
+/**
+ * Extract a Notion ID from a raw input (URL or UUID). Returns a 32-char hex string
+ * when possible, otherwise returns the original input.
+ */
+function extractNotionId(input) {
+  if (!input || typeof input !== 'string') return input;
+  const re = /([a-f0-9]{8}-?[a-f0-9]{4}-?[a-f0-9]{4}-?[a-f0-9]{4}-?[a-f0-9]{12})|([a-f0-9]{32})/i;
+  const m = input.match(re);
+  if (!m) return input;
+  const id = (m[1] || m[2] || '').replace(/-/g, '');
+  return id;
 }
 
 const BANNER = `
@@ -31,35 +44,168 @@ const BANNER = `
 `;
 
 function parseArgs(argv) {
-  const out = { flat: false };
-  for (const a of argv) {
+  const out = { flat: false, id: null, out: null, help: false, token: null };
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
     if (a === '--flat' || a === '-f') out.flat = true;
+    else if (a === '--help' || a === '-h') out.help = true;
+    else if (a === '--id' || a === '-i') {
+      const raw = argv[i + 1];
+      out.id = extractNotionId(raw);
+      i += 1;
+    } else if (a === '--out' || a === '-o') {
+      out.out = argv[i + 1];
+      i += 1;
+    } else if (a === '--token' || a === '-t') {
+      out.token = argv[i + 1];
+      i += 1;
+    }
   }
+
   return out;
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    console.log([
+      'Usage: pagesdown [options]',
+      '',
+      'Options:',
+      '  -i, --id <id-or-url>  Specify an explicit Notion Page/Database UUID or full Share Link',
+      '  -f, --flat            Enable unified single-file context layout mode',
+      '  -o, --out <path>      Specify a custom local directory output path (default: current directory)',
+      '  -h, --help            Show this help information',
+    ].join('\n'));
+    process.exit(0);
+  }
   console.log(BANNER);
   p.intro('pagesdown v0.1.2');
 
-  // ── Step 1: Token ─────────────────────────────────────────────────
+  // ── Prepare config/token ──────────────────────────────────────────
   let token = null;
   let workspaceName = null;
 
   const savedConfig = await loadConfig();
 
-  if (savedConfig?.token) {
-    const useSaved = exitIfCancelled(
-      await p.confirm({
-        message: `Use saved token${savedConfig.workspace ? ` for "${savedConfig.workspace}"` : ''}?`,
-      })
-    );
-
-    if (useSaved) {
-      token = savedConfig.token;
-      workspaceName = savedConfig.workspace;
+  // If user supplied a new token via CLI flag, prefer and save it (after validation)
+  let tokenSavedViaFlag = false;
+  if (args.token) {
+    token = args.token;
+    const spinValidate = p.spinner();
+    spinValidate.start('Validating token...');
+    const tmpClient = new NotionClient(token);
+    try {
+      await tmpClient.validateToken();
+      spinValidate.stop('Token valid.');
+      // Save immediately
+      await saveConfig({ token, workspace: savedConfig?.workspace });
+      tokenSavedViaFlag = true;
+      p.log.success('Token saved to ~/.pagesdown/config.json');
+    } catch (err) {
+      spinValidate.stop('Validation failed.');
+      p.log.error('Provided token is invalid. Aborting.');
+      process.exit(1);
     }
+  }
+
+  // Use saved token silently if present (no interactive prompt)
+  if (!token && savedConfig?.token) {
+    token = savedConfig.token;
+    workspaceName = savedConfig.workspace;
+  }
+
+  // Headless mode: --id provided -> skip interactive prompts entirely
+  if (args.id) {
+    // Prefer token already resolved (flag or saved), fallback to env var
+    token = token || process.env.NOTION_TOKEN || null;
+
+    if (!token) {
+      p.log.error('No Notion token found. Set NOTION_TOKEN or save a token with the CLI.');
+      process.exit(1);
+    }
+
+    // Connect and validate
+    const spin = p.spinner();
+    spin.start('Connecting to Notion...');
+
+    const notion = new NotionClient(token);
+    try {
+      await notion.validateToken();
+      spin.stop('Connected to Notion.');
+    } catch (err) {
+      spin.stop('Connection failed.');
+      p.log.error(
+        err.status === 401
+          ? 'Invalid token. Make sure you copied the "Internal Integration Secret", not the Integration ID.'
+          : 'Could not connect to Notion. Check your internet connection and try again.'
+      );
+      process.exit(1);
+    }
+
+    // Resolve target id (page or database) and fetch title
+    let targetItem;
+    try {
+      const page = await notion.getPage(args.id);
+      const name = extractTitle(page) || 'Exported-Page';
+      targetItem = { id: args.id, name, type: 'page' };
+    } catch (errPage) {
+      try {
+        const db = await notion.getDatabase(args.id);
+        const name = db?.title?.length ? db.title.map((t) => t.plain_text).join('') : 'Exported-Page';
+        targetItem = { id: args.id, name, type: 'database' };
+      } catch (errDb) {
+        p.log.error(`Could not fetch page or database with id "${args.id}". Ensure the ID is correct and shared with the integration.`);
+        process.exit(1);
+      }
+    }
+
+    // Resolve output path
+    const savePath = path.resolve(args.out || process.cwd());
+
+    if (!(await isWritablePath(savePath))) {
+      p.log.error(`Cannot write to "${savePath}". Check that the folder exists and you have permission.`);
+      process.exit(1);
+    }
+
+    if (existsSync(savePath)) {
+      p.log.info(`"${savePath}" already exists. New pages will be added, existing pages will be updated.`);
+    }
+
+    // Start download immediately with a single-item map
+    spin.start('Starting download...');
+
+    const stats = await downloadPages([ { id: targetItem.id, name: targetItem.name, type: targetItem.type } ], savePath, notion, {
+      onStatus: (message) => spin.message(message),
+      onLog: (message) => {
+        spin.stop(message);
+        spin.start('...');
+      },
+      onError: (message) => {
+        spin.stop('');
+        p.log.warn(message);
+        spin.start('Continuing...');
+      },
+    }, { flat: args.flat });
+
+    spin.stop(`${stats.totalPages} page${stats.totalPages === 1 ? '' : 's'}, ${stats.totalAssets} asset${stats.totalAssets === 1 ? '' : 's'} downloaded.`);
+
+    // Summary
+    const summary = [`${stats.totalPages} page${stats.totalPages === 1 ? '' : 's'} downloaded`];
+    if (stats.totalAssets > 0) summary.push(`${stats.totalAssets} file${stats.totalAssets === 1 ? '' : 's'} saved`);
+    if (stats.errors.length > 0) summary.push(`${stats.errors.length} error${stats.errors.length === 1 ? '' : 's'}`);
+
+    if (stats.errors.length > 0) {
+      p.log.warn('Some items had errors:');
+      for (const err of stats.errors) {
+        p.log.warn(`  - ${err.title}: ${err.error}`);
+      }
+    }
+
+    p.note(savePath, 'Saved to');
+    p.outro(`Done! ${summary.join(', ')}.`);
+    process.exit(0);
   }
 
   if (!token) {
@@ -263,17 +409,13 @@ async function main() {
     process.exit(0);
   }
 
-  // Save token for future use (if it's a new token)
-  if (!savedConfig?.token || savedConfig.token !== token) {
-    const shouldSave = exitIfCancelled(
-      await p.confirm({
-        message: 'Save token for future use? (stored in ~/.pagesdown/config.json)',
-      })
-    );
-
-    if (shouldSave) {
+  // Save token automatically if we prompted for it (no saved config existed)
+  if (!savedConfig?.token && !tokenSavedViaFlag && token) {
+    try {
       await saveConfig({ token, workspace: workspaceName });
-      p.log.success('Token saved.');
+      p.log.success('Token saved to ~/.pagesdown/config.json');
+    } catch {
+      p.log.warn('Failed to save token to config file.');
     }
   }
 
