@@ -1,0 +1,12 @@
+{
+  "json.schemas": [
+    {
+      "fileMatch": ["pagesdown.config.json", "pagesdown.config.example.json"],
+      "url": "./schemas/config.schema.ui.json"
+    },
+    {
+      "fileMatch": ["/Users/sam/.pagesdown/config.json"],
+      "url": "./schemas/config.schema.ui.json"
+    }
+  ]
+}
