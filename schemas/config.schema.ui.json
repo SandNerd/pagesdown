@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/neethanwu/pagesdown/main/schemas/config.schema.ui.json",
+  "title": "pagesdown configuration (UI-friendly)",
+  "description": "UI-friendly JSON Schema copy — relaxed constraints for visual editors.",
+  "type": "object",
+  "properties": {
+    "token": {
+      "type": "string",
+      "description": "Notion integration token (optional)",
+      "title": "Notion Token"
+    },
+    "workspace": {
+      "type": "string",
+      "description": "Optional workspace name",
+      "title": "Workspace"
+    },
+    "defaultOutputDir": {
+      "type": "string",
+      "description": "Default export directory",
+      "title": "Default Output Directory"
+    },
+    "targets": {
+      "type": "array",
+      "description": "List of sync targets",
+      "items": {
+        "type": "object",
+        "$ref": "#/definitions/target"
+      },
+      "title": "Targets"
+    },
+    "$$schema": {
+      "type": "string",
+      "description": "Optional $schema reference for editors"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "targets": [
+        {
+          "url": "https://notion.so/page-id-or-full-url",
+          "outDir": "./output",
+          "filename": "MyPage",
+          "flat": false
+        }
+      ]
+    }
+  ],
+  "definitions": {
+    "target": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Notion page/database id (32-char or hyphenated)",
+          "title": "Notion ID"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Notion share link or page URL",
+          "title": "Notion URL"
+        },
+        "name": {
+          "type": "string",
+          "title": "Name"
+        },
+        "group": {
+          "type": "string",
+          "title": "Group"
+        },
+        "outDir": {
+          "type": "string",
+          "title": "Output Directory"
+        },
+        "filename": {
+          "type": "string",
+          "title": "Filename"
+        },
+        "flat": {
+          "type": "boolean",
+          "title": "Flat Mode"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "csv"
+          ],
+          "title": "Output Format"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "download",
+            "upload-only",
+            "two-way"
+          ],
+          "title": "Sync Direction"
+        },
+        "disabled": {
+          "type": "boolean",
+          "title": "Disabled"
+        },
+        "conflict": {
+          "type": "string",
+          "enum": [
+            "local-wins",
+            "notion-wins"
+          ],
+          "title": "Conflict Policy"
+        }
+      },
+      "additionalProperties": false,
+      "title": "Target"
+    }
+  }
+}
