@@ -236,6 +236,12 @@ export function parseArgs(argv) {
       out.flat = true;
     } else if (a === 'status') {
       out.statusMode = true;
+      // capture an immediate trailing positional filter (e.g. `pagesdown status sys-design`)
+      const next = argv[i + 1];
+      if (next && typeof next === 'string' && !next.startsWith('-')) {
+        out.statusFilter = next;
+        i += 1;
+      }
     } else if (a === '--help' || a === '-h') {
       out.help = true;
     } else if (a === '--id' || a === '-i') {
@@ -336,6 +342,7 @@ export async function main() {
       '',
       'Commands:',
       '  sync                  Run batch download from pagesdown.config.json or ~/.pagesdown/config.json',
+      '  status                Show sync status for manifest targets (supports name or group filtering)',
       '                        Project-local pagesdown.config.json takes precedence and can also provide token/defaultOutputDir',
       '                        You can limit which targets are processed by passing a positional filter',
       '                        after `sync` or by using the `--group` / `-g` flag.',

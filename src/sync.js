@@ -599,7 +599,31 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
   const results = [];
   const counts = { upToDate: 0, needsPull: 0, needsPush: 0, conflict: 0, remoteOnly: 0, localUntracked: 0, disabled: 0, failed: 0 };
 
-  for (const target of manifest.targets) {
+  // Apply optional filters (name/group) to narrow targets before network calls
+  let targets = manifest.targets || [];
+  const statusFilter = args?.statusFilter || args?.syncFilter || null;
+  const groupFilter = args?.groupFilter || null;
+
+  if (statusFilter || groupFilter) {
+    const missingNameTargets = targets.filter((t) => !t || typeof t.name !== 'string' || t.name.trim() === '');
+    if (missingNameTargets.length > 0) {
+      prompts.log.warn('Tip: Some targets in your manifest are missing a `name` property. Add descriptive `name` values to enable targeted status checks by name or group.');
+    }
+
+    let filtered = targets;
+    if (statusFilter) filtered = filtered.filter((t) => t && (t.name === statusFilter || t.group === statusFilter));
+    if (groupFilter) filtered = filtered.filter((t) => t && t.group === groupFilter);
+
+    if (!filtered || filtered.length === 0) {
+      const filterText = statusFilter || groupFilter || '';
+      prompts.log.warn(`No targets found matching filter: "${filterText}". Check your pagesdown.config.json names.`);
+      return { results: [], counts };
+    }
+
+    targets = filtered;
+  }
+
+  for (const target of targets) {
     if (!target) continue;
     if (target.disabled) {
       counts.disabled++;
