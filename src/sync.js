@@ -611,8 +611,19 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
     }
 
     let filtered = targets;
-    if (statusFilter) filtered = filtered.filter((t) => t && (t.name === statusFilter || t.group === statusFilter));
-    if (groupFilter) filtered = filtered.filter((t) => t && t.group === groupFilter);
+    if (statusFilter) {
+      const q = String(statusFilter).toLowerCase();
+      filtered = filtered.filter((t) => {
+        if (!t) return false;
+        const n = (t.name || '').toLowerCase();
+        const g = (t.group || '').toLowerCase();
+        return n.includes(q) || g.includes(q);
+      });
+    }
+    if (groupFilter) {
+      const gq = String(groupFilter).toLowerCase();
+      filtered = filtered.filter((t) => t && String(t.group || '').toLowerCase() === gq);
+    }
 
     if (!filtered || filtered.length === 0) {
       const filterText = statusFilter || groupFilter || '';
@@ -721,8 +732,17 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
 
     // compute local hash if file exists
     let localHash = null;
+    let localMtime = null;
     if (localExists) {
-      try { localHash = await calculateFileHash(localPath); } catch { /* ignore */ }
+      try {
+        localHash = await calculateFileHash(localPath);
+        try {
+          const st = await fs.stat(localPath);
+          localMtime = st.mtime ? new Date(st.mtime).toISOString() : null;
+        } catch {
+          localMtime = null;
+        }
+      } catch { /* ignore */ }
     }
 
     // determine status
@@ -771,23 +791,56 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
       status,
       recommendation,
       localHash,
+      localMtime,
       remoteMtime,
     });
   }
+  // Apply post-filters (status, since, exclude-disabled) before display
+  let displayed = results;
 
-  // Print a human-friendly table and summary
+  if (args?.excludeDisabled) {
+    displayed = displayed.filter((r) => r.status !== 'disabled');
+  }
+
+  if (args?.onlyStatus) {
+    const wanted = new Set(String(args.onlyStatus).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+    displayed = displayed.filter((r) => wanted.has(String(r.status || '').toLowerCase()));
+  }
+
+  if (typeof args?.sinceDays === 'number' && !isNaN(args.sinceDays)) {
+    const sinceMs = Number(args.sinceDays) * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    displayed = displayed.filter((r) => {
+      const t = r.remoteMtime ? Date.parse(r.remoteMtime) : (r.localMtime ? Date.parse(r.localMtime) : null);
+      if (!t || isNaN(t)) return false;
+      return (now - t) <= sinceMs;
+    });
+  }
+
+  // Compute display counts from filtered results
+  const displayCounts = displayed.reduce((acc, r) => {
+    const key = r.status || 'unknown';
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  // Output
   console.log('\npagesdown sync status\n');
+  if (args?.jsonOutput) {
+    console.log(JSON.stringify({ results: displayed, counts: displayCounts }, null, 2));
+    return { results: displayed, counts: displayCounts };
+  }
+
   try {
-    // Use basic console.table fallback if available
-    console.table(results.map(r => ({ Name: r.name, Id: r.id, Type: r.type, Status: r.status, Local: r.localPath || '', Ledger: r.ledgerRel || '', Action: r.recommendation })));
+    console.table(displayed.map(r => ({ Name: r.name, Id: r.id, Type: r.type, Status: r.status, Local: r.localPath || '', Ledger: r.ledgerRel || '', Action: r.recommendation })));
   } catch {
-    for (const r of results) {
+    for (const r of displayed) {
       console.log(`${r.name} (${r.id}) — ${r.status} — ${r.recommendation}`);
     }
   }
 
-  console.log('\nSummary:', `up-to-date=${counts.upToDate}`, `needsPull=${counts.needsPull}`, `needsPush=${counts.needsPush}`, `conflicts=${counts.conflict}`, `remoteOnly=${counts.remoteOnly}`, `localUntracked=${counts.localUntracked}`, `disabled=${counts.disabled}`, `failed=${counts.failed}`);
-  return { results, counts };
+  console.log('\nSummary:', displayCounts);
+  return { results: displayed, counts: displayCounts };
 }
 
 /**

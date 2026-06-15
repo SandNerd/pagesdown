@@ -220,7 +220,7 @@ const BANNER = `
 `;
 
 export function parseArgs(argv) {
-  const out = { flat: false, id: null, out: null, help: false, token: null, idClip: false, debug: false, type: 'markdown', format: null, sync: null, syncMode: false, syncFilter: null, groupFilter: null, noCache: false, watchMode: false, statusMode: false };
+  const out = { flat: false, id: null, out: null, help: false, token: null, idClip: false, debug: false, type: 'markdown', format: null, sync: null, syncMode: false, syncFilter: null, groupFilter: null, noCache: false, watchMode: false, statusMode: false, statusFilter: null, onlyStatus: null, excludeDisabled: false, sinceDays: null, jsonOutput: false };
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -274,6 +274,17 @@ export function parseArgs(argv) {
     } else if (a === '--group' || a === '-g') {
       out.groupFilter = argv[i + 1];
       i += 1;
+    } else if (a === '--only-status') {
+      out.onlyStatus = argv[i + 1];
+      i += 1;
+    } else if (a === '--exclude-disabled') {
+      out.excludeDisabled = true;
+    } else if (a === '--since') {
+      const raw = argv[i + 1];
+      out.sinceDays = Number(raw);
+      i += 1;
+    } else if (a === '--json') {
+      out.jsonOutput = true;
     } else if (a === '--no-cache') {
       out.noCache = true;
     } else if (a === '--watch' || a === '-w') {
@@ -367,6 +378,10 @@ export async function main() {
       '      --format <markdown-tree|markdown-flat|csv>  Output format for targets and immediate downloads',
       '      --sync <pull-only|push-only|two-way|push-override|two-way-override>  Force sync mode for this run (when using --id) or for created targets',
       '  -g, --group <name>    Limit sync to targets with matching `group` in config',
+        '      --only-status <status1,status2>  Show only targets matching these statuses (comma-separated)',
+        '      --exclude-disabled             Exclude targets with "disabled": true from status output',
+        '      --since <days>                 Show only targets changed within the last N days (remote or local)',
+        '      --json                         Emit JSON output (for scripts)',
       '  -w, --watch           Enter watch mode: automatically push local file changes to Notion (requires sync mode)',
       '  -h, --help            Show this help information',
     ].join('\n'))
