@@ -1,11 +1,14 @@
 import * as p from '@clack/prompts';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { NotionClient, extractTitle } from './notion.js';
-import { loadConfig, saveConfig } from './config.js';
+import { pathToFileURL } from 'node:url';
+import { NotionClient } from './notion.js';
+import { extractTitle, extractDatabaseTitle } from './notion-helpers.js';
+import { loadConfig, loadProjectConfig, saveConfig } from './config.js';
 import { getSaveLocationOptions, isWritablePath } from './utils.js';
 import { downloadPages } from './download.js';
+import { executeSyncMode, startSyncWatchMode, executeStatus } from './sync.js';
 
 /** Exit cleanly if the user cancels a prompt. */
 function exitIfCancelled(value) {
@@ -16,11 +19,183 @@ function exitIfCancelled(value) {
   return value;
 }
 
+export async function browseAndSelect(notion, savedConfig, prompts = p) {
+  const selectedItemsMap = new Map(); // pageId/databaseId -> { id, name, type }
+  let currentFolderId = null; // null means Notion root
+  let currentFolderName = 'Notion Root';
+  const folderHistoryStack = []; // [{ id, name }]
+
+  const spin = prompts.spinner ? prompts.spinner() : { start: () => {}, stop: () => {}, message: () => {} };
+
+  if (prompts.log && prompts.log.info) prompts.log.info('Hint: Enter selects a row. Use rows to toggle items or drill into folders.');
+
+  let selected;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    spin.start(currentFolderId ? `Loading folder: ${currentFolderName}...` : 'Fetching your pages...');
+
+    let items = [];
+    try {
+      if (currentFolderId === null) {
+          const topLevelItems = await notion.getTopLevelPages({
+            onProgress: (count) => spin.message(`Scanning... (${count} items found)`),
+          });
+
+        items = topLevelItems.map((item) => ({
+          id: item.id,
+          name: item.title || item.id,
+          type: item.type,
+          isFolder: item.type === 'database' || Boolean(item.hasChildren),
+        }));
+      } else {
+        try {
+          const children = await notion.getBlockChildren(currentFolderId);
+          const filtered = children.filter((block) => block.type === 'child_page' || block.type === 'child_database');
+          items = filtered.map((block) => {
+            const isDatabase = block.type === 'child_database';
+            const name = isDatabase
+              ? (block.child_database?.title || block.id)
+              : (block.child_page?.title || block.id);
+
+            return {
+              id: block.id,
+              name,
+              type: isDatabase ? 'database' : 'page',
+              isFolder: isDatabase || Boolean(block.has_children),
+            };
+          });
+        } catch {
+          // If this ID is a database, allow drill-down by listing its rows as pages.
+          const rows = await notion.queryDatabase(currentFolderId);
+          items = rows.map((row) => ({
+            id: row.id,
+            name: extractTitle(row) || row.id,
+            type: 'page',
+            isFolder: false,
+          }));
+        }
+      }
+    } catch (err) {
+      spin.stop('Failed to fetch items.');
+      p.log.error(`Error: ${err.message}`);
+      throw err;
+    }
+
+    spin.stop(currentFolderId
+      ? `Found ${items.length} item${items.length === 1 ? '' : 's'} in ${currentFolderName}.`
+      : `Found ${items.length} top-level item${items.length === 1 ? '' : 's'}.`);
+
+    if (currentFolderId === null && items.length === 0) {
+      if (prompts.log && prompts.log.warn) prompts.log.warn('No pages found. Make sure you\'ve shared at least one page with your integration.');
+
+      const retry = exitIfCancelled(
+        await prompts.confirm({
+          message: 'Share some pages in Notion, then try again?',
+        })
+      );
+
+      if (!retry) {
+        p.cancel('No pages to download.');
+        throw new Error('No pages');
+      }
+      continue;
+    }
+
+    const itemOptions = items.map((item) => {
+      const isChecked = selectedItemsMap.has(item.id);
+      const icon = item.type === 'database' ? '📁' : '📄';
+      const check = isChecked ? '[X]' : '[ ]';
+
+      return {
+        value: item.id,
+        label: `${check} ${icon} ${item.name}`,
+      };
+    });
+
+    const options = [
+      { value: 'ACTION_FINISH', label: '🚀 [🏁 FINISH SELECTION & START SYNC]' },
+      ...(currentFolderId !== null
+        ? [{ value: 'ACTION_GO_BACK', label: '🛑 [⬅ Go Back to Parent Folder]' }]
+        : []),
+      ...itemOptions,
+    ];
+
+    const breadcrumb = folderHistoryStack.map((f) => f.name).concat(currentFolderName).join(' / ');
+
+    const chosen = exitIfCancelled(
+      await prompts.select({
+        message: `Browse: ${breadcrumb}`,
+        options,
+      })
+    );
+
+    if (chosen === 'ACTION_FINISH') {
+      selected = Array.from(selectedItemsMap.values());
+      if (selected.length === 0) {
+        p.log.warn('No items selected yet. Select at least one page/database before finishing.');
+        continue;
+      }
+      break;
+    }
+
+    if (chosen === 'ACTION_GO_BACK') {
+      const prev = folderHistoryStack.pop();
+      currentFolderId = prev?.id ?? null;
+      currentFolderName = prev?.name ?? 'Notion Root';
+      continue;
+    }
+
+    const clickedItem = items.find((it) => it.id === chosen);
+    if (!clickedItem) continue;
+
+    if (clickedItem.isFolder || clickedItem.type === 'database') {
+      const action = exitIfCancelled(
+        await prompts.select({
+          message: `${clickedItem.name}: choose an action`,
+          options: [
+            { value: 'toggle', label: '1) Toggle selection for this entire directory' },
+            { value: 'enter', label: '2) Enter directory to view sub-pages' },
+            { value: 'cancel', label: 'Cancel' },
+          ],
+        })
+      );
+
+      if (action === 'toggle') {
+        if (selectedItemsMap.has(clickedItem.id)) {
+          selectedItemsMap.delete(clickedItem.id);
+        } else {
+          selectedItemsMap.set(clickedItem.id, { id: clickedItem.id, name: clickedItem.name, type: clickedItem.type });
+        }
+        continue;
+      }
+
+      if (action === 'enter') {
+        folderHistoryStack.push({ id: currentFolderId, name: currentFolderName });
+        currentFolderId = clickedItem.id;
+        currentFolderName = clickedItem.name;
+        continue;
+      }
+
+      continue;
+    }
+
+    // Standard page row: toggle selection directly.
+    if (selectedItemsMap.has(clickedItem.id)) {
+      selectedItemsMap.delete(clickedItem.id);
+    } else {
+      selectedItemsMap.set(clickedItem.id, { id: clickedItem.id, name: clickedItem.name, type: clickedItem.type });
+    }
+  }
+
+  return selected;
+}
+
 /**
  * Extract a Notion ID from a raw input (URL or UUID). Returns a 32-char hex string
  * when possible, otherwise returns the original input.
  */
-function extractNotionId(input) {
+export function extractNotionId(input) {
   if (!input || typeof input !== 'string') return input;
   const re = /([a-f0-9]{8}-?[a-f0-9]{4}-?[a-f0-9]{4}-?[a-f0-9]{4}-?[a-f0-9]{12})|([a-f0-9]{32})/i;
   const m = input.match(re);
@@ -44,14 +219,26 @@ const BANNER = `
 ╚═════╝  ╚═════╝  ╚══╝╚══╝ ╚═╝  ╚═══╝
 `;
 
-function parseArgs(argv) {
-  const out = { flat: false, id: null, out: null, help: false, token: null, idClip: false };
+export function parseArgs(argv) {
+  const out = { flat: false, id: null, out: null, help: false, token: null, idClip: false, debug: false, type: 'markdown', format: null, sync: null, syncMode: false, syncFilter: null, groupFilter: null, noCache: false, watchMode: false, statusMode: false };
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--flat' || a === '-f') out.flat = true;
-    else if (a === '--help' || a === '-h') out.help = true;
-    else if (a === '--id' || a === '-i') {
+    if (a === 'sync') {
+      out.syncMode = true;
+      // Capture an immediate trailing positional filter (e.g. `pagesdown sync sys-design`)
+      const next = argv[i + 1];
+      if (next && typeof next === 'string' && !next.startsWith('-')) {
+        out.syncFilter = next;
+        i += 1;
+      }
+    } else if (a === '--flat' || a === '-f') {
+      out.flat = true;
+    } else if (a === 'status') {
+      out.statusMode = true;
+    } else if (a === '--help' || a === '-h') {
+      out.help = true;
+    } else if (a === '--id' || a === '-i') {
       const raw = argv[i + 1];
       // Support reading the id/url from stdin by passing '-' after --id
       out.id = raw === '-' ? '-' : extractNotionId(raw);
@@ -64,34 +251,126 @@ function parseArgs(argv) {
       i += 1;
     } else if (a === '--id-clip') {
       out.idClip = true;
+    } else if (a === '--debug' || a === '-d') {
+      out.debug = true;
     } else if (a === '--token' || a === '-t') {
       out.token = argv[i + 1];
       i += 1;
+    } else if (a === '--type') {
+      out.type = argv[i + 1];
+      i += 1;
+    } else if (a === '--format') {
+      out.format = argv[i + 1];
+      i += 1;
+    } else if (a === '--sync') {
+      out.sync = argv[i + 1];
+      i += 1;
+    } else if (a === '--group' || a === '-g') {
+      out.groupFilter = argv[i + 1];
+      i += 1;
+    } else if (a === '--no-cache') {
+      out.noCache = true;
+    } else if (a === '--watch' || a === '-w') {
+      out.watchMode = true;
     }
   }
 
   return out;
 }
 
-async function main() {
+/**
+ * Merge config sources with project-local values taking precedence over user config.
+ */
+export function resolveConfigSources(projectConfig, savedConfig, envToken = process.env.NOTION_TOKEN || null) {
+  return {
+    token: projectConfig?.token || savedConfig?.token || envToken || null,
+    workspace: projectConfig?.workspace || savedConfig?.workspace || null,
+    defaultOutputDir: projectConfig?.defaultOutputDir || savedConfig?.defaultOutputDir || null,
+  };
+}
+
+/**
+ * Choose the sync manifest source with project-local config taking precedence.
+ * Falls back to the user config if the local file is missing or does not define targets.
+ */
+export function resolveSyncManifest(projectConfig, savedConfig) {
+  if (Array.isArray(projectConfig?.targets) && projectConfig.targets.length > 0) {
+    return projectConfig;
+  }
+  if (Array.isArray(savedConfig?.targets) && savedConfig.targets.length > 0) {
+    return savedConfig;
+  }
+  return null;
+}
+
+export function getHeadlessExitCode(stats) {
+  return stats?.errors?.length > 0 ? 1 : 0;
+}
+
+/**
+ * Load pagesdown.config.json from current working directory.
+ * Expects an object with targets array: [{ source, outDir, filename?, format?, sync? }]
+ */
+export function loadLocalManifest() {
+  const manifestPath = path.join(process.cwd(), 'pagesdown.config.json');
+  if (!existsSync(manifestPath)) {
+    return null;
+  }
+  try {
+    const raw = readFileSync(manifestPath, 'utf-8');
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data.targets)) {
+      throw new Error('Manifest must have a "targets" array');
+    }
+    return data;
+  } catch (err) {
+    throw new Error(`Failed to load ${manifestPath}: ${err.message}`);
+  }
+}
+
+export async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log([
-      'Usage: pagesdown [options]',
+      'Usage: pagesdown [command] [options]',
+      '',
+      'Commands:',
+      '  sync                  Run batch download from pagesdown.config.json or ~/.pagesdown/config.json',
+      '                        Project-local pagesdown.config.json takes precedence and can also provide token/defaultOutputDir',
+      '                        You can limit which targets are processed by passing a positional filter',
+      '                        after `sync` or by using the `--group` / `-g` flag.',
+      '                        Use `--watch` or `-w` to continuously monitor tracked files for changes and',
+      '                        automatically push them to Notion in real-time.',
+      '                        Examples:',
+      '                          pagesdown sync sys-design       # run targets named or grouped sys-design',
+      '                          pagesdown sync -g docs          # run targets with group: "docs"',
+      '                          pagesdown sync --watch          # start watching for file changes',
       '',
       'Options:',
       '  -i, --id <id-or-url>  Specify an explicit Notion Page/Database UUID or full Share Link',
       '                       Use "-" to read the id/url from stdin (pipe/echo)',
       '                       Use "--id-clip" to read the URL from the clipboard (macOS pbpaste)',
-      '  -f, --flat            Enable unified single-file layout (optimized: sparse tables, internal anchors)',
+      '  -f, --flat            Enable unified single-file layout (legacy flag; use --format=markdown-flat)',
       '  -o, --out <path>      Specify a custom local directory output path (default: current directory)',
+      '  -d, --debug           Enable verbose debug logging (helpful for troubleshooting)',
       '      --set-default-out <path>  Set and save the global default output directory and exit',
-      '  -t, --token <token>   Set and save a Notion integration token',
+      '  -t, --token <token>     Set and save a Notion integration token',
+      '      --no-cache          Do not read or write the local .pagesdown-state.json ledger (force fresh downloads)',
+      '      --type <markdown|csv>  (legacy) Output format for database exports (default: markdown)',
+      '      --format <markdown-tree|markdown-flat|csv>  Output format for targets and immediate downloads',
+      '      --sync <pull-only|push-only|two-way|push-override|two-way-override>  Force sync mode for this run (when using --id) or for created targets',
+      '  -g, --group <name>    Limit sync to targets with matching `group` in config',
+      '  -w, --watch           Enter watch mode: automatically push local file changes to Notion (requires sync mode)',
       '  -h, --help            Show this help information',
-    ].join('\n'));
+    ].join('\n'))
     process.exit(0);
   }
   
+  // Enable debug mode early so other modules can check env var
+  if (args.debug) {
+    process.env.PAGESDOWN_DEBUG = '1';
+    p.log.info('Debug logging enabled (PAGESDOWN_DEBUG=1)');
+  }
   // If the user asked to read the id/url from stdin (pipe/echo), do that now.
   if (args.id === '-') {
     // Read all stdin
@@ -123,10 +402,12 @@ async function main() {
   p.intro('pagesdown v0.1.2');
 
   // ── Prepare config/token ──────────────────────────────────────────
-  let token = null;
-  let workspaceName = null;
-
+  const projectConfig = await loadProjectConfig();
   const savedConfig = await loadConfig();
+  const resolvedConfig = resolveConfigSources(projectConfig, savedConfig);
+  let token = resolvedConfig.token;
+  let workspaceName = resolvedConfig.workspace;
+  const defaultOutputDir = resolvedConfig.defaultOutputDir;
 
   // If the user requested to set the default output directory via CLI, handle it now and exit.
   if (args.setDefaultOut) {
@@ -151,6 +432,7 @@ async function main() {
   let tokenSavedViaFlag = false;
   if (args.token) {
     token = args.token;
+    p.log.info('Using token provided via --token flag (will validate and save).');
     const spinValidate = p.spinner();
     spinValidate.start('Validating token...');
     const tmpClient = new NotionClient(token);
@@ -168,10 +450,81 @@ async function main() {
     }
   }
 
+  // Project-local config takes precedence over user config for shared settings.
+  if (!token && projectConfig?.token) {
+    token = projectConfig.token;
+    workspaceName = projectConfig.workspace;
+    p.log.info('Using token from ./pagesdown.config.json');
+  }
+
+  // Status subcommand: local-only summary of manifest vs ledger/remote
+  if (args.statusMode) {
+    try {
+      const manifest = resolveSyncManifest(projectConfig, savedConfig);
+      if (!manifest) {
+        p.log.error('No sync targets found. Add a "targets" array to ./pagesdown.config.json or ~/.pagesdown/config.json.');
+        process.exit(1);
+      }
+      token = token || process.env.NOTION_TOKEN || null;
+      await executeStatus(manifest, token, args);
+      process.exit(0);
+    } catch (err) {
+      p.log.error(err.message || String(err));
+      process.exit(1);
+    }
+  }
+
   // Use saved token silently if present (no interactive prompt)
   if (!token && savedConfig?.token) {
     token = savedConfig.token;
     workspaceName = savedConfig.workspace;
+    p.log.info('Using saved token from ~/.pagesdown/config.json');
+  }
+
+  // If an env var token exists and no other token yet, prefer it but log.
+  if (!token && process.env.NOTION_TOKEN) {
+    token = process.env.NOTION_TOKEN;
+    p.log.info('Using token from NOTION_TOKEN environment variable');
+  }
+
+  // ── Sync mode: batch download from manifest ───────────────────────
+  if (args.syncMode) {
+    // Load manifest file (project-local config first, then user config fallback)
+    try {
+      const manifest = resolveSyncManifest(projectConfig, savedConfig);
+      if (!manifest) {
+        p.log.error('No sync targets found. Add a "targets" array to ./pagesdown.config.json or ~/.pagesdown/config.json.');
+        p.log.info('Create one with this structure:');
+        p.log.info(JSON.stringify({
+          targets: [
+            { source: 'https://notion.so/page-id-or-full-url', outDir: './output', filename: 'MyPage', format: 'markdown-tree', sync: 'pull-only' },
+          ],
+        }, null, 2));
+        process.exit(1);
+      }
+      // Warn if manifest contains explicitly disabled targets
+      const disabledCount = (manifest.targets || []).filter((t) => t && t.disabled === true).length;
+      if (disabledCount > 0) {
+        p.log.warn(`Manifest contains ${disabledCount} disabled target${disabledCount === 1 ? '' : 's'}. These will be skipped during sync.`);
+        p.log.info('Use "disabled": true on a target to temporarily disable it. Remove the flag to re-enable.');
+      }
+    } catch (err) {
+      p.log.error(`${err.message}`);
+      process.exit(1);
+    }
+
+    // Delegate to sync execution module
+    token = token || process.env.NOTION_TOKEN || null;
+    
+    // Check if watch mode is requested
+    if (args.watchMode) {
+      await startSyncWatchMode(resolveSyncManifest(projectConfig, savedConfig), token, args);
+      // startSyncWatchMode handles shutdown, should not reach here unless error
+      process.exit(0);
+    } else {
+      const syncResult = await executeSyncMode(resolveSyncManifest(projectConfig, savedConfig), token, args);
+      process.exit(syncResult && syncResult.failedTargets && syncResult.failedTargets.length > 0 ? 1 : 0);
+    }
   }
 
   // Headless mode: --id provided -> skip interactive prompts entirely
@@ -180,7 +533,7 @@ async function main() {
     token = token || process.env.NOTION_TOKEN || null;
 
     if (!token) {
-      p.log.error('No Notion token found. Set NOTION_TOKEN or save a token with the CLI.');
+      p.log.error('No Notion token found. Set NOTION_TOKEN or save a token with the CLI (pagesdown -t <token>).');
       process.exit(1);
     }
 
@@ -207,11 +560,12 @@ async function main() {
     try {
       const page = await notion.getPage(args.id);
       const name = extractTitle(page) || 'Exported-Page';
+      if (name === 'Untitled') p.log.info(`Title lookup returned 'Untitled' for page ${args.id}; falling back to other heuristics.`);
       targetItem = { id: args.id, name, type: 'page' };
     } catch (errPage) {
       try {
         const db = await notion.getDatabase(args.id);
-        const name = db?.title?.length ? db.title.map((t) => t.plain_text).join('') : 'Exported-Page';
+        const name = extractDatabaseTitle(db) || 'Exported-Database';
         targetItem = { id: args.id, name, type: 'database' };
       } catch (errDb) {
         p.log.error(`Could not fetch page or database with id "${args.id}". Ensure the ID is correct and shared with the integration.`);
@@ -220,7 +574,7 @@ async function main() {
     }
 
     // Resolve output path
-    const savePath = path.resolve(args.out || savedConfig?.defaultOutputDir || process.cwd());
+    const savePath = path.resolve(args.out || defaultOutputDir || process.cwd());
 
     if (!(await isWritablePath(savePath))) {
       p.log.error(`Cannot write to "${savePath}". Check that the folder exists and you have permission.`);
@@ -234,6 +588,13 @@ async function main() {
     // Start download immediately with a single-item map
     spin.start('Starting download...');
 
+    // Map CLI `format` to download options
+    const chosenFormat = args.format || (args.type === 'csv' ? 'csv' : (args.flat ? 'markdown-flat' : 'markdown-tree'));
+    const dlOpts = { debug: args.debug };
+    if (chosenFormat === 'markdown-flat') { dlOpts.flat = true; dlOpts.type = 'markdown'; }
+    else if (chosenFormat === 'markdown-tree') { dlOpts.flat = false; dlOpts.type = 'markdown'; }
+    else if (chosenFormat === 'csv') { dlOpts.flat = false; dlOpts.type = 'csv'; }
+
     const stats = await downloadPages([ { id: targetItem.id, name: targetItem.name, type: targetItem.type } ], savePath, notion, {
       onStatus: (message) => spin.message(message),
       onLog: (message) => {
@@ -245,7 +606,7 @@ async function main() {
         p.log.warn(message);
         spin.start('Continuing...');
       },
-    }, { flat: args.flat });
+    }, dlOpts);
 
     spin.stop(`${stats.totalPages} page${stats.totalPages === 1 ? '' : 's'}, ${stats.totalAssets} asset${stats.totalAssets === 1 ? '' : 's'} downloaded.`);
 
@@ -263,7 +624,7 @@ async function main() {
 
     p.note(savePath, 'Saved to');
     p.outro(`Done! ${summary.join(', ')}.`);
-    process.exit(0);
+    process.exit(getHeadlessExitCode(stats));
   }
 
   if (!token) {
@@ -339,84 +700,8 @@ async function main() {
     );
   }
 
-  // ── Step 3: Fetch & select pages (with refresh loop) ──────────────
-  let selected;
-
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    spin.start('Fetching your pages...');
-
-    let topLevelItems;
-    try {
-      topLevelItems = await notion.getTopLevelPages({
-        onProgress: (count) => spin.message(`Scanning... (${count} items found)`),
-      });
-    } catch (err) {
-      spin.stop('Failed to fetch pages.');
-      p.log.error(`Error: ${err.message}`);
-      process.exit(1);
-    }
-
-    spin.stop(`Found ${topLevelItems.length} top-level item${topLevelItems.length === 1 ? '' : 's'}.`);
-
-    if (topLevelItems.length === 0) {
-      p.log.warn('No pages found. Make sure you\'ve shared at least one page with your integration.');
-
-      const retry = exitIfCancelled(
-        await p.confirm({
-          message: 'Share some pages in Notion, then try again?',
-        })
-      );
-
-      if (!retry) {
-        p.cancel('No pages to download.');
-        process.exit(0);
-      }
-      continue;
-    }
-
-    const options = topLevelItems.map((item) => ({
-      value: item,
-      label: item.title,
-      hint: item.type === 'database' ? 'database' : undefined,
-    }));
-
-    p.log.info('Hint: arrows move, space toggle, enter confirm');
-
-    selected = exitIfCancelled(
-      await p.multiselect({
-        message: 'Select pages to download:',
-        options,
-        required: true,
-      })
-    );
-
-    const looksGood = exitIfCancelled(
-      await p.confirm({
-        message: 'Look good? (No = share more pages in Notion and refresh the list)',
-      })
-    );
-
-    if (!looksGood) {
-      p.note(
-        [
-          '  1. Open a page in Notion',
-          '  2. Click the ••• menu at the top right',
-          '  3. Select "Connections"',
-          '  4. Add your integration',
-          '',
-          'Sharing a parent page automatically shares all its children.',
-        ].join('\n'),
-        'How to share pages with your integration'
-      );
-      exitIfCancelled(
-        await p.confirm({ message: 'Done sharing? Press Enter to refresh.' })
-      );
-      continue;
-    }
-
-    break;
-  }
+  // ── Step 3: Stateful drill-down selection ─────────────────────────
+  const selected = await browseAndSelect(notion, savedConfig);
 
   // ── Step 5: Save location ─────────────────────────────────────────
   const locationOptions = getSaveLocationOptions();
@@ -502,6 +787,13 @@ async function main() {
   // ── Download ──────────────────────────────────────────────────────
   spin.start('Starting download...');
 
+  // Map CLI `format` to download options for interactive download
+  const chosenFormatInt = args.format || (args.type === 'csv' ? 'csv' : (args.flat ? 'markdown-flat' : 'markdown-tree'));
+  const dlOptsInt = { debug: args.debug };
+  if (chosenFormatInt === 'markdown-flat') { dlOptsInt.flat = true; dlOptsInt.type = 'markdown'; }
+  else if (chosenFormatInt === 'markdown-tree') { dlOptsInt.flat = false; dlOptsInt.type = 'markdown'; }
+  else if (chosenFormatInt === 'csv') { dlOptsInt.flat = false; dlOptsInt.type = 'csv'; }
+
   const stats = await downloadPages(selected, savePath, notion, {
     onStatus: (message) => spin.message(message),
     onLog: (message) => {
@@ -513,7 +805,7 @@ async function main() {
       p.log.warn(message);
       spin.start('Continuing...');
     },
-  }, { flat: args.flat });
+  }, dlOptsInt);
 
   spin.stop(`${stats.totalPages} page${stats.totalPages === 1 ? '' : 's'}, ${stats.totalAssets} asset${stats.totalAssets === 1 ? '' : 's'} downloaded.`);
 
@@ -537,7 +829,9 @@ async function main() {
   p.outro(`Done! ${summary.join(', ')}.`);
 }
 
-main().catch(() => {
-  p.log.error('Unexpected error. Please try again.');
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(() => {
+    p.log.error('Unexpected error. Please try again.');
+    process.exit(1);
+  });
+}
