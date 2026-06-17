@@ -3,10 +3,8 @@
 Download your Notion content to local Markdown files. It now supports both a guided interactive flow and a fully headless CLI, with LLM-friendly flat exports, slugged filenames, and config-backed defaults.
 
 ### Why?
-
 I got sick of Notion's MCP server burning through tokens on every read, querying back and forth for what should be a simple task. The search tool can't even list database pages without a query. Connection drops kill your flow mid-task.
 
-I'm local-first on almost everything now — the cloud just happens after my work, for syncing results. So I decided to pull my thousands of Notion pages down to local Markdown and enjoy my sweet time with my agents. Zero MCP overhead, zero token waste, works offline.
 
 **Works with** Claude Code, Codex, and any agent that reads your local filesystem.
 
@@ -24,9 +22,6 @@ Under the hood:
 - Your local agent just reads `.md` files — no live Notion calls, no token burn.
 
 ### Developer documentation
-
-For contributors and automation agents, we maintain concise developer docs that map features to files, explain the ledger and manifest formats, and provide quick setup steps:
-
 - **Architecture & module map:** [docs/ARCH.md](docs/ARCH.md)
 - **Spec (manifest, ledger, markers):** [docs/SPEC.md](docs/SPEC.md)
 - **Developer quickstart & code map:** [docs/DEVELOPER_QUICKSTART.md](docs/DEVELOPER_QUICKSTART.md)
@@ -96,16 +91,8 @@ Copy the **Internal Integration Secret** (starts with `ntn_`).
 
 Open any page you want to download in Notion:
 - Click the **•••** menu at the top right
-- Select **Connections**
 - Add your integration
 
-> Sharing a parent page automatically shares all its children.
-
-### What You Get
-
-```text
-~/Desktop/notion-export/
-├── Project Alpha/
 │   ├── Project Alpha.md
 │   ├── Meeting Notes/
 │   │   ├── Meeting Notes.md
@@ -137,19 +124,19 @@ Open any page you want to download in Notion:
     - One row per Notion row/page, with property values (Title, Select, Multi‑Select, Text, Number, Date, Checkbox, etc.) converted to plain text.
   - Ideal for feeding LLMs a compact view of structured data without separate files.
 
-### `--flat` mode: single‑file, LLM‑friendly context
+### Flat mode: single‑file, LLM‑friendly context
 
 By default, pagesdown creates folders and separate markdown files for sub‑pages.
 
-If you want a **single, unified context file** for local LLMs (similar to repomix‑style dumps), use `--flat`:
+If you want a **single, unified context file** for local LLMs (similar to repomix‑style dumps), use `--format flattened`:
 
 ```bash
-pagesdown --flat
+pagesdown --format flattened
 # or
-npx pagesdown --flat
+npx pagesdown --format flattened
 ```
 
-When `--flat` is enabled:
+When `--format flattened` is used:
 
 - **No sub‑page folders/files** are created for `child_page` blocks.
 - Instead, each sub‑page is **fully downloaded and rendered inline** into the parent document.
@@ -170,18 +157,18 @@ This preserves structure but keeps everything in a single file that’s easy to 
 pagesdown can run without prompts when you already know the target page or database:
 
 ```bash
-pagesdown --id "https://www.notion.so/My-Page-abcdef1234567890abcdef1234567890" --out ~/Desktop/notion-export
+pagesdown --source "https://www.notion.so/My-Page-abcdef1234567890abcdef1234567890" --out ~/Desktop/notion-export
 ```
 
 Useful variants:
 
 ```bash
-pagesdown --id <uuid-or-url> --out <folder>
-pagesdown -i - --out <folder>              # read the URL from stdin
-pagesdown --id-clip --out <folder>         # macOS clipboard input
-pagesdown --token <secret> --id <uuid>     # validate and save token before exporting
+pagesdown --source <uuid-or-url> --out <folder>
+pagesdown -s - --out <folder>              # read the URL from stdin
+pagesdown --source-clip --out <folder>     # macOS clipboard input
+pagesdown --token <secret> --source <uuid> # validate and save token before exporting
 pagesdown --set-default-out <folder>       # save a global default output directory and exit
-pagesdown --debug --id <uuid>              # verbose logs for troubleshooting
+pagesdown --debug --source <uuid>          # verbose logs for troubleshooting
 ```
 
 When you run headless, the save path is resolved in this order:
@@ -200,7 +187,16 @@ For automated, declarative batch downloads, use `pagesdown sync` with a `pagesdo
 pagesdown sync
 ```
 
-This reads sync targets from `pagesdown.config.json` in the current directory first, then falls back to `~/.pagesdown/config.json` if no local targets are defined. Each target can have a custom output directory and optional custom filename.
+This reads sync targets from `pagesdown.config.json` in the current directory first, then falls back to `~/.pagesdown/config.json` if no local targets are defined. Each target can specify a `path` which is either an output directory or a full file path.
+
+
+Filtering targets: `pagesdown sync [filter]` accepts a positional filter or `--group` to limit which targets are processed. Matching is flexible:
+
+- Directory containment: if the filter resolves to a directory, pagesdown matches any target whose `path` resolves to that directory or is nested inside it (subdirectories). Tilde expansion (`~`) and `realpath` normalization are applied before comparison to ensure consistent behavior across symlinks and trailing slashes.
+- Path prefix matching: if the filter resolves to a path that is not an existing directory, pagesdown will match targets whose resolved path equals the filter or starts with the filter (path prefix).
+- Filename & name prefix matching: pagesdown matches targets where the `filename` equals the filter or starts with the filter; target `name` matches are case-insensitive and support prefix matches.
+- Notion source matching: the filter matches a target's `source` value (Notion URL or ID) exactly; the implementation extracts Notion IDs from URLs for robust comparisons.
+- Group matching: use `--group <name>` or pass the group name as the positional filter to match targets in a group.
 
 If `pagesdown.config.json` also includes a `token` or `defaultOutputDir`, those values take precedence over `~/.pagesdown/config.json` when the file is present in the current directory.
 
@@ -215,31 +211,56 @@ Create a `pagesdown.config.json` in your project root:
   "targets": [
     {
       "source": "https://www.notion.so/My-Page-abcdef1234567890abcdef1234567890",
-      "outDir": "./docs/my-page",
-      "filename": "main",
+      "path": "./docs/my-page/main",
       "format": "markdown-tree"
     },
     {
       "source": "abcdef1234567890abcdef1234567890ab",
-      "outDir": "./exports/database",
-      "format": "markdown-flat"
+      "path": "./exports/database",
+      "format": "flattened"
     }
   ]
 }
 ```
 
 Each target supports:
-- **`source`** (required): Notion page/database UUID or full share URL (previously `id`/`url`).
-- **`outDir`** (required): local directory where files will be saved.
-- **`filename`** (optional): override the Notion title with this custom name (without extension).
-- **`format`** (optional): one of `"markdown-tree"` (default), `"markdown-flat"`, or `"csv"`. Controls how the downloader emits files for this target.
-- **`sync`** (optional): one of `"pull-only"` (default), `"push-only"`, `"two-way"`, `"push-override"`, `"two-way-override"`. Controls sync behavior and whether local edits are pushed back to Notion.
+  - **`source`** (required): Notion page/database UUID or full share URL.
+  - **`path`** (required): local output directory or file path. If the basename of `path` contains a file extension, `path` is treated as an explicit file path; otherwise it is treated as an output directory and pagesdown will generate a filename automatically from the Notion title or slug.
+- **`format`** (optional): one of `"markdown-tree"` (default), `"flattened"`, or `"csv"`. Controls how the downloader emits files for this target.
+  - **`sync`** (optional): one of `"pull-only"` (default), `"push-only"`, or `"two-way"`. Controls sync behavior and whether local edits are pushed back to Notion. To force a push that may overwrite Notion structural content, run `pagesdown sync` with the `--force` (`-f`) flag.
 - **`conflict`** (optional, `"local-wins"` | `"notion-wins"`): conflict policy used when both the local file and the remote page changed. Default is `"notion-wins"`, which preserves the Notion version by downloading it. Set `"local-wins"` to overwrite the cloud copy from the local file.
 - **`disabled`** (optional, boolean): set to `true` to temporarily disable a target. Disabled targets are ignored by `pagesdown sync` and by watch mode; they will not be fetched, downloaded, or pushed. Use this to temporarily exclude a target without removing it from your manifest.
+ - **`frontmatter`** (optional, boolean|string): controls YAML frontmatter behavior for this target. When set to `true`, pagesdown will include generated YAML frontmatter at the top of downloaded Markdown files. When omitted or set to `false`, YAML frontmatter will be omitted from downloaded files (CLI/headless default). When set to a string (e.g. `"metadata"`), pagesdown will strip YAML from the uploaded body and instead inject the raw YAML text into the named Notion page property during pushes/uploads.
+
+Or, use grouped configuration to reduce repetition and apply shared defaults across multiple targets. A manifest may include either a top-level `targets` array or a `groups` array where each group defines shared defaults and a nested `targets` list. Targets inside a group inherit group-level fields (`format`, `sync`, `conflict`, `frontmatter`) and receive the group's `name` as their `group` property. Individual target fields override group defaults.
+
+Grouped example:
+
+```json
+{
+  "token": "ntn_xxx_local_override",
+  "defaultOutputDir": "./exports",
+  "groups": [
+    {
+      "name": "docs",
+      "format": "markdown-tree",
+      "sync": "pull-only",
+      "targets": [
+        { "source": "https://www.notion.so/page-A", "path": "./docs/page-a" },
+        { "source": "https://www.notion.so/page-B", "path": "./docs/page-b", "format": "flattened" }
+      ]
+    }
+  ]
+}
+```
+
+Implementation note: when a manifest with `groups` is loaded, pagesdown flattens the groups into a unified `targets` array for processing. Each flattened target will contain a `group` property with the group's name and inherited defaults applied. This normalization is transparent to CLI commands and scripts.
+
+
 
 #### Format Options
 
-pagesdown supports three per-target output formats: `markdown-tree` (default), `markdown-flat`, and `csv`. Set the `format` field on each target to choose how pages and databases are emitted on disk.
+pagesdown supports three per-target output formats: `markdown-tree` (default), `flattened`, and `csv`. Set the `format` field on each target to choose how pages and databases are emitted on disk.
 
 - `markdown-tree` (default)
   - What it does: creates a directory hierarchy that mirrors Notion. Each page is written as its own `.md` file. Child pages become subfolders with their own `.md` files. Assets are saved into `assets/` folders alongside each page.
@@ -260,13 +281,13 @@ pagesdown supports three per-target output formats: `markdown-tree` (default), `
 ```json
 {
   "source": "https://www.notion.so/My-Page-abcdef...",
-  "outDir": "./docs/my-page",
+  "path": "./docs/my-page",
   "format": "markdown-tree"
 }
 ```
 
-- `markdown-flat`
-  - What it does: inlines child pages into the parent document and writes a single `.md` file at the `outDir` level. Inlined sub-pages are wrapped with explicit markers so LLMs and tools can detect boundaries.
+- `flattened`
+  - What it does: inlines child pages into the parent document and writes a single `.md` file at the `path` level (or at the generated filename under `path` if `path` is a directory). Inlined sub-pages are wrapped with explicit markers so LLMs and tools can detect boundaries.
   - When to use: when you prefer a single LLM-friendly file per target.
   - Example output:
 
@@ -292,14 +313,13 @@ pagesdown supports three per-target output formats: `markdown-tree` (default), `
 ```json
 {
   "source": "...",
-  "outDir": "./docs",
-  "filename": "my-page.md",
-  "format": "markdown-flat"
+  "path": "./docs/my-page.md",
+  "format": "flattened"
 }
 ```
 
 - `csv`
-  - What it does: when a target points at a Notion database, pagesdown writes a single RFC4180-compliant CSV file with one row per database row. Column order follows the database properties (Title first when present). The CSV is written into the target `outDir` as `filename` (if provided) or `<slugified-database-name>.csv`.
+  - What it does: when a target points at a Notion database, pagesdown writes a single RFC4180-compliant CSV file with one row per database row. Column order follows the database properties (Title first when present). The CSV is written to the configured `path` (if `path` is a file) or into the `path` directory as `<slugified-database-name>.csv` when `path` is a directory.
   - When to use: exporting Notion databases for spreadsheets or downstream data processing.
   - Notes:
     - Multi-select values are joined with `, `.
@@ -310,21 +330,20 @@ pagesdown supports three per-target output formats: `markdown-tree` (default), `
 ```json
 {
   "source": "<database-id-or-url>",
-  "outDir": "./exports/db",
-  "format": "csv",
-  "filename": "my-database.csv"
+  "path": "./exports/db/my-database.csv",
+  "format": "csv"
 }
 ```
 
 Tips:
-- If `filename` contains a code extension (for example `script.js` or `deploy.sh`), pagesdown treats the target as a code artifact and extracts Notion `code` blocks into a plain file (no Markdown).
-- The CLI flags `--flat` and the legacy `--type csv` map directly to `format` values: `--flat` → `markdown-flat`, `--type csv` or `--format csv` → `csv`.
+ - If `path` points to a file whose basename contains a code extension (for example `script.js` or `deploy.sh`), pagesdown treats the target as a code artifact and extracts Notion `code` blocks into a plain file (no Markdown).
+- Use `--format` to select the output form: `--format flattened` for single-file flattening, and `--format csv` for database exports.
 
 #### Two-Way Sync
 
-When `sync` is set to `"two-way"` (or `"two-way-override"`), pagesdown will:
+When `sync` is set to `"two-way"`, pagesdown will:
 
-1. Check the local file hash against the `.pagesdown-state.json` ledger.
+1. Check the local file hash against the pagesdown ledger (project-local `.pagesdown-state.json` or global `~/.pagesdown/state.json`).
 2. If the local file has changed but the Notion page hasn't (same `last_edited_time`), push the local edits to Notion.
 3. Clear the page content and replace it with the Markdown-generated blocks.
 4. Update the ledger with the new file hash and remote mtime.
@@ -334,13 +353,13 @@ Script & code-file syncs
 If you configure a target with a `filename` that includes a code extension (for example `script.js`, `deploy.sh`, or `schema.sql`), pagesdown treats that target as a code artifact rather than a Markdown document when downloading.
 
 - On download, pagesdown will extract raw `code` blocks from the Notion page and concatenate them into a plain code file (no Markdown fences or headers). This produces a clean, ready-to-run source file for local development or LLM agents.
--- On upload (two-way, push-only, or their `-override` variants), pagesdown performs a safety check and will abort any push if the local file contains flattened Markdown tables or sub-page markers — these indicate that pushing could destroy live Notion database structure. To force a push despite detected table/subpage signatures, set `sync` to either `push-override` or `two-way-override`. In non-override modes the CLI will warn with a `[SAFETY BYPASS]` message and skip the push for that target.
+-- On upload (two-way, push-only), pagesdown performs a safety check and will abort any push if the local file contains flattened Markdown tables or sub-page markers — these indicate that pushing could destroy live Notion database structure. To force a push despite detected table/subpage signatures, run the command with `--force` (or `-f`). In non-forced runs the CLI will warn with a `[SAFETY BYPASS]` message and skip the push for that target.
 
 This creates a safe developer workflow: keep scripts as code files in Notion using `code` blocks, and use pagesdown to synchronize them without accidental structural damage to your Notion databases.
 
 This enables safe round-trip editing: make changes to the local Markdown file, and they'll be synced back to Notion when you run `pagesdown sync`.
 
-When `sync` is set to `"push-only"` (or `"push-override"`), pagesdown will:
+When `sync` is set to `"push-only"`, pagesdown will:
 
 1. Skip remote timestamp checks for that target.
 2. Compare the local file hash to the ledger's `last_synced_local_hash`.
@@ -394,7 +413,7 @@ NOTION_TOKEN=ntn_xxx pagesdown sync
 # With debug logging
 pagesdown sync --debug
 
-# Cache behavior: by default `pagesdown sync` records a local ledger (.pagesdown-state.json)
+# Cache behavior: by default `pagesdown sync` records a ledger (project-local `.pagesdown-state.json` or global `~/.pagesdown/state.json`)
 # mapping Notion IDs to generated output files and file hashes, so future syncs can
 # skip unchanged targets. To force full downloads and bypass the ledger, use:
 
@@ -413,6 +432,7 @@ You can limit which targets are processed by passing a positional filter after t
 
 - Positional filter: `pagesdown sync sys-design` — runs only targets whose `name` or `group` matches `sys-design`.
 - Group flag: `pagesdown sync --group docs` or `pagesdown sync -g docs` — runs only targets with `group: "docs"`.
+- Directory path: `pagesdown sync ./docs` — when you pass a local directory path, pagesdown will match all targets whose configured `outDir` resolves to that absolute directory (tilde-expansion and realpath normalization are applied). This also accepts absolute paths, e.g. `pagesdown sync /home/me/projects/site/docs`.
 
 Note: To use name-based filtering, ensure your targets include a `name` field in `pagesdown.config.json`. If some targets lack `name`, pagesdown will warn with a tip asking you to add descriptive names to the manifest.
 
@@ -438,7 +458,7 @@ When watch mode is active:
    - Logs a timestamped confirmation: `[Watcher] HH:MM:SS - Pushed upstream successfully.`
 5. **Ctrl+C** closes all file watchers cleanly, flushes the ledger to disk, and exits.
 
-Watch mode works with both `push-only` and `two-way` sync modes (or the corresponding override variants). It requires that your targets have been downloaded and tracked in `.pagesdown-state.json` before entering watch mode (run `pagesdown sync` once first if you're starting fresh).
+Watch mode works with both `push-only` and `two-way` sync modes. Use the `--force` (`-f`) flag to bypass the structural safety preflight when pushing. It requires that your targets have been downloaded and tracked in the pagesdown ledger (project-local `.pagesdown-state.json` or global `~/.pagesdown/state.json`) before entering watch mode (run `pagesdown sync` once first if you're starting fresh).
 
 Example workflow:
 
@@ -462,7 +482,7 @@ This creates a live sync loop ideal for developers and AI agents that need to co
 - Markdown content keeps the original page title inside the file.
 - Folder and file names are slugified to lowercase, web-safe names.
 - Child pages, databases, and assets still live in predictable local folders.
-- In flat mode, internal links are rewritten with explicit anchors so the final document stays readable and navigable.
+-- In `flattened` mode, internal links are rewritten with explicit anchors so the final document stays readable and navigable.
 
 ### Features
 
@@ -470,7 +490,7 @@ This creates a live sync loop ideal for developers and AI agents that need to co
 - **Explicit source handling** — accepts Notion UUIDs, full share URLs, stdin input, and clipboard input on macOS.
 - **Token persistence** — validates and saves your token for next time in `~/.pagesdown/config.json`.
 - **Config-backed defaults** — remembers a default output directory and lets you set it directly with `--set-default-out`.
-- **Flat mode (`--flat`/`-f`)** — inlines sub-pages into a single LLM-friendly document with internal anchors.
+-- **Flat mode (`--format flattened`)** — inlines sub-pages into a single LLM-friendly document with internal anchors.
 - **Inline synced blocks** — referenced content is resolved and rendered inline.
 - **Inline child databases** — rendered as Markdown tables, with sparse empty columns pruned and relation titles resolved when possible.
 - **Metadata-aware tables** — includes useful Notion property types like created/edited timestamps and author fields.
@@ -489,21 +509,21 @@ pagesdown [command] [options]
 - `sync`: Run batch download from `pagesdown.config.json` manifest
 
 **Options:**
-- `-i, --id <id-or-url>`: export a specific page or database by UUID or full Notion share link.
-- `-f, --flat`: flatten sub-pages into one document and use anchor-based internal links.
+- `-s, --source <id-or-url>`: export a specific page or database by UUID or full Notion share link.
+- `--format <format>`: select output format; use `--format flattened` to flatten sub-pages into one document.
 - `-o, --out <path>`: choose the output directory for this run.
 - `--set-default-out <path>`: save a default output directory for future runs and exit.
 - `-t, --token <token>`: validate and save a Notion integration token.
-- `--id-clip`: read the page or database link from the clipboard on macOS.
+- `--source-clip`: read the page or database link from the clipboard on macOS.
 - `-d, --debug`: enable verbose diagnostic logging.
 - `-h, --help`: show the full CLI help.
 
 Examples:
 
 ```bash
-pagesdown --id "https://www.notion.so/My-Page-abcdef1234567890abcdef1234567890" --flat
-pagesdown --id 12345678-1234-1234-1234-1234567890ab --out ~/Desktop/notion-export
-echo "https://www.notion.so/Another-Page-abcdef1234567890abcdef1234567890" | pagesdown -i -
+pagesdown --source "https://www.notion.so/My-Page-abcdef1234567890abcdef1234567890" --format flattened
+pagesdown --source 12345678-1234-1234-1234-1234567890ab --out ~/Desktop/notion-export
+echo "https://www.notion.so/Another-Page-abcdef1234567890abcdef1234567890" | pagesdown -s -
 pagesdown sync                    # batch download from config file
 NOTION_TOKEN=ntn_xxx pagesdown sync   # sync with explicit token
 ```

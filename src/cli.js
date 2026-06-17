@@ -1,12 +1,12 @@
 import * as p from '@clack/prompts';
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { NotionClient } from './notion.js';
 import { extractTitle, extractDatabaseTitle } from './notion-helpers.js';
-import { loadConfig, loadProjectConfig, saveConfig } from './config.js';
-import { getSaveLocationOptions, isWritablePath } from './utils.js';
+import { loadConfig, loadProjectConfig, saveConfig, flattenManifest } from './config.js';
+import { getSaveLocationOptions, isWritablePath, safeMerge } from './utils.js';
 import { downloadPages } from './download.js';
 import { executeSyncMode, startSyncWatchMode, executeStatus } from './sync.js';
 
@@ -24,6 +24,8 @@ export async function browseAndSelect(notion, savedConfig, prompts = p) {
   let currentFolderId = null; // null means Notion root
   let currentFolderName = 'Notion Root';
   const folderHistoryStack = []; // [{ id, name }]
+  let emptyFetchAttempts = 0;
+  const MAX_EMPTY_FETCH_ATTEMPTS = 5;
 
   const spin = prompts.spinner ? prompts.spinner() : { start: () => {}, stop: () => {}, message: () => {} };
 
@@ -86,6 +88,8 @@ export async function browseAndSelect(notion, savedConfig, prompts = p) {
       ? `Found ${items.length} item${items.length === 1 ? '' : 's'} in ${currentFolderName}.`
       : `Found ${items.length} top-level item${items.length === 1 ? '' : 's'}.`);
 
+    if (items.length > 0) emptyFetchAttempts = 0;
+
     if (currentFolderId === null && items.length === 0) {
       if (prompts.log && prompts.log.warn) prompts.log.warn('No pages found. Make sure you\'ve shared at least one page with your integration.');
 
@@ -99,6 +103,13 @@ export async function browseAndSelect(notion, savedConfig, prompts = p) {
         p.cancel('No pages to download.');
         throw new Error('No pages');
       }
+
+      emptyFetchAttempts++;
+      if (emptyFetchAttempts >= MAX_EMPTY_FETCH_ATTEMPTS) {
+        p.log.error('No pages found after multiple attempts. Aborting.');
+        throw new Error('No pages after retries');
+      }
+
       continue;
     }
 
@@ -204,23 +215,10 @@ export function extractNotionId(input) {
   return id;
 }
 
-const BANNER = `
-██████╗  █████╗  ██████╗ ███████╗███████╗
-██╔══██╗██╔══██╗██╔════╝ ██╔════╝██╔════╝
-██████╔╝███████║██║  ███╗█████╗  ███████╗
-██╔═══╝ ██╔══██║██║   ██║██╔══╝  ╚════██║
-██║     ██║  ██║╚██████╔╝███████╗███████║
-╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚══════╝
-██████╗  ██████╗ ██╗    ██╗███╗   ██╗
-██╔══██╗██╔═══██╗██║    ██║████╗  ██║
-██║  ██║██║   ██║██║ █╗ ██║██╔██╗ ██║
-██║  ██║██║   ██║██║███╗██║██║╚██╗██║
-██████╔╝╚██████╔╝╚███╔███╔╝██║ ╚████║
-╚═════╝  ╚═════╝  ╚══╝╚══╝ ╚═╝  ╚═══╝
-`;
+const BANNER = `Notion Drive`;
 
 export function parseArgs(argv) {
-  const out = { flat: false, id: null, out: null, help: false, token: null, idClip: false, debug: false, type: 'markdown', format: null, sync: null, syncMode: false, syncFilter: null, groupFilter: null, noCache: false, watchMode: false, statusMode: false, statusFilter: null, onlyStatus: null, excludeDisabled: false, sinceDays: null, jsonOutput: false };
+  const out = { source: null, out: null, help: false, token: null, sourceClip: false, debug: false, type: 'markdown', format: null, sync: null, syncMode: false, syncFilter: null, groupFilter: null, noCache: false, watchMode: false, statusMode: false, statusFilter: null, onlyStatus: null, excludeDisabled: false, sinceDays: null, jsonOutput: false, force: false };
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -232,8 +230,10 @@ export function parseArgs(argv) {
         out.syncFilter = next;
         i += 1;
       }
-    } else if (a === '--flat' || a === '-f') {
-      out.flat = true;
+    } else if (a === '--source' || a === '-s') {
+      const raw = argv[i + 1];
+      out.source = raw === '-' ? '-' : extractNotionId(raw);
+      i += 1;
     } else if (a === 'status') {
       out.statusMode = true;
       // capture an immediate trailing positional filter (e.g. `pagesdown status sys-design`)
@@ -244,10 +244,8 @@ export function parseArgs(argv) {
       }
     } else if (a === '--help' || a === '-h') {
       out.help = true;
-    } else if (a === '--id' || a === '-i') {
-      const raw = argv[i + 1];
-      // Support reading the id/url from stdin by passing '-' after --id
-      out.id = raw === '-' ? '-' : extractNotionId(raw);
+    } else if (a === '--format') {
+      out.format = argv[i + 1];
       i += 1;
     } else if (a === '--out' || a === '-o') {
       out.out = argv[i + 1];
@@ -255,8 +253,8 @@ export function parseArgs(argv) {
     } else if (a === '--set-default-out') {
       out.setDefaultOut = argv[i + 1];
       i += 1;
-    } else if (a === '--id-clip') {
-      out.idClip = true;
+    } else if (a === '--source-clip') {
+      out.sourceClip = true;
     } else if (a === '--debug' || a === '-d') {
       out.debug = true;
     } else if (a === '--token' || a === '-t') {
@@ -287,6 +285,8 @@ export function parseArgs(argv) {
       out.jsonOutput = true;
     } else if (a === '--no-cache') {
       out.noCache = true;
+    } else if (a === '--force' || a === '-f') {
+      out.force = true;
     } else if (a === '--watch' || a === '-w') {
       out.watchMode = true;
     }
@@ -298,7 +298,7 @@ export function parseArgs(argv) {
 /**
  * Merge config sources with project-local values taking precedence over user config.
  */
-export function resolveConfigSources(projectConfig, savedConfig, envToken = process.env.NOTION_TOKEN || null) {
+export function resolveConfigSources(projectConfig, savedConfig, envToken = null) {
   return {
     token: projectConfig?.token || savedConfig?.token || envToken || null,
     workspace: projectConfig?.workspace || savedConfig?.workspace || null,
@@ -326,7 +326,8 @@ export function getHeadlessExitCode(stats) {
 
 /**
  * Load pagesdown.config.json from current working directory.
- * Expects an object with targets array: [{ source, outDir, filename?, format?, sync? }]
+ * Expects an object with targets array: [{ source, path?, format?, sync? }]
+ * The `path` field may be a directory (generated filename) or a full file path.
  */
 export function loadLocalManifest() {
   const manifestPath = path.join(process.cwd(), 'pagesdown.config.json');
@@ -336,17 +337,22 @@ export function loadLocalManifest() {
   try {
     const raw = readFileSync(manifestPath, 'utf-8');
     const data = JSON.parse(raw);
-    if (!Array.isArray(data.targets)) {
-      throw new Error('Manifest must have a "targets" array');
+    if (!(Array.isArray(data.targets) || Array.isArray(data.groups))) {
+      throw new Error('Manifest must have a "targets" or "groups" array');
     }
-    return data;
+
+    // Normalize grouped layout into a flat targets array for the rest of the engine
+    return flattenManifest(data);
   } catch (err) {
     throw new Error(`Failed to load ${manifestPath}: ${err.message}`);
   }
 }
 
-export async function main() {
+export async function main(envToken = null) {
   const args = parseArgs(process.argv.slice(2));
+  try {
+    process.stdin.setMaxListeners(0);
+  } catch (err) {}
   if (args.help) {
     console.log([
       'Usage: pagesdown [command] [options]',
@@ -365,18 +371,18 @@ export async function main() {
       '                          pagesdown sync --watch          # start watching for file changes',
       '',
       'Options:',
-      '  -i, --id <id-or-url>  Specify an explicit Notion Page/Database UUID or full Share Link',
-      '                       Use "-" to read the id/url from stdin (pipe/echo)',
-      '                       Use "--id-clip" to read the URL from the clipboard (macOS pbpaste)',
-      '  -f, --flat            Enable unified single-file layout (legacy flag; use --format=markdown-flat)',
+      '  -s, --source <id-or-url>  Specify an explicit Notion Page/Database UUID or full Share Link',
+      '                       Use "-" to read the source id/url from stdin (pipe/echo)',
+      '                       Use "--source-clip" to read the URL from the clipboard (macOS pbpaste)',
       '  -o, --out <path>      Specify a custom local directory output path (default: current directory)',
       '  -d, --debug           Enable verbose debug logging (helpful for troubleshooting)',
       '      --set-default-out <path>  Set and save the global default output directory and exit',
       '  -t, --token <token>     Set and save a Notion integration token',
       '      --no-cache          Do not read or write the local .pagesdown-state.json ledger (force fresh downloads)',
-      '      --type <markdown|csv>  (legacy) Output format for database exports (default: markdown)',
-      '      --format <markdown-tree|markdown-flat|csv>  Output format for targets and immediate downloads',
-      '      --sync <pull-only|push-only|two-way|push-override|two-way-override>  Force sync mode for this run (when using --id) or for created targets',
+      '      --type <markdown|csv>  Output format for database exports (default: markdown)',
+      '      --format <markdown-tree|flattened|csv>  Output format for targets and immediate downloads',
+      '      --sync <pull-only|push-only|two-way>  Force sync mode for this run (when using --source) or for created targets',
+      '      --force, -f           Bypass structural preflight when pushing to Notion (use with caution)',
       '  -g, --group <name>    Limit sync to targets with matching `group` in config',
         '      --only-status <status1,status2>  Show only targets matching these statuses (comma-separated)',
         '      --exclude-disabled             Exclude targets with "disabled": true from status output',
@@ -393,40 +399,28 @@ export async function main() {
     process.env.PAGESDOWN_DEBUG = '1';
     p.log.info('Debug logging enabled (PAGESDOWN_DEBUG=1)');
   }
-  // If the user asked to read the id/url from stdin (pipe/echo), do that now.
-  if (args.id === '-') {
+  // If the user asked to read the source id/url from stdin (pipe/echo), do that now.
+  if (args.source === '-') {
     // Read all stdin
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(chunk);
     const input = Buffer.concat(chunks).toString('utf8').trim();
     if (!input) {
-      p.log.error('No input received on stdin for --id.');
+      p.log.error('No input received on stdin for --source.');
       process.exit(1);
     }
-    args.id = extractNotionId(input);
+    args.source = extractNotionId(input);
   }
 
-  // If requested, read the id/url from the system clipboard (macOS)
-  if (args.idClip) {
-    try {
-      const clip = execSync('pbpaste', { encoding: 'utf8' }).toString().trim();
-      if (!clip) {
-        p.log.error('Clipboard is empty.');
-        process.exit(1);
-      }
-      args.id = extractNotionId(clip);
-    } catch (err) {
-      p.log.error(`Failed to read clipboard: ${err.message}`);
-      process.exit(1);
-    }
-  }
+  // If requested, read the source id/url from the system clipboard (macOS)
+  // Handled later as part of headless (--source) flow to centralize clipboard access.
   console.log(BANNER);
   p.intro('pagesdown v0.1.2');
 
   // ── Prepare config/token ──────────────────────────────────────────
   const projectConfig = await loadProjectConfig();
   const savedConfig = await loadConfig();
-  const resolvedConfig = resolveConfigSources(projectConfig, savedConfig);
+  const resolvedConfig = resolveConfigSources(projectConfig, savedConfig, envToken);
   let token = resolvedConfig.token;
   let workspaceName = resolvedConfig.workspace;
   const defaultOutputDir = resolvedConfig.defaultOutputDir;
@@ -440,7 +434,7 @@ export async function main() {
     }
 
     try {
-      const newConfig = Object.assign({}, savedConfig || {}, { defaultOutputDir: resolved });
+      const newConfig = safeMerge({}, savedConfig || {}, { defaultOutputDir: resolved });
       await saveConfig(newConfig);
       p.log.success(`Saved default output directory to ~/.pagesdown/config.json: ${resolved}`);
       process.exit(0);
@@ -487,7 +481,7 @@ export async function main() {
         p.log.error('No sync targets found. Add a "targets" array to ./pagesdown.config.json or ~/.pagesdown/config.json.');
         process.exit(1);
       }
-      token = token || process.env.NOTION_TOKEN || null;
+      token = token || envToken || null;
       await executeStatus(manifest, token, args);
       process.exit(0);
     } catch (err) {
@@ -504,8 +498,8 @@ export async function main() {
   }
 
   // If an env var token exists and no other token yet, prefer it but log.
-  if (!token && process.env.NOTION_TOKEN) {
-    token = process.env.NOTION_TOKEN;
+  if (!token && envToken) {
+    token = envToken;
     p.log.info('Using token from NOTION_TOKEN environment variable');
   }
 
@@ -519,8 +513,8 @@ export async function main() {
         p.log.info('Create one with this structure:');
         p.log.info(JSON.stringify({
           targets: [
-            { source: 'https://notion.so/page-id-or-full-url', outDir: './output', filename: 'MyPage', format: 'markdown-tree', sync: 'pull-only' },
-          ],
+              { source: 'https://notion.so/page-id-or-full-url', path: './output/MyPage', format: 'markdown-tree', sync: 'pull-only' },
+            ],
         }, null, 2));
         process.exit(1);
       }
@@ -536,7 +530,7 @@ export async function main() {
     }
 
     // Delegate to sync execution module
-    token = token || process.env.NOTION_TOKEN || null;
+    token = token || envToken || null;
     
     // Check if watch mode is requested
     if (args.watchMode) {
@@ -549,17 +543,27 @@ export async function main() {
     }
   }
 
-  // Headless mode: --id provided -> skip interactive prompts entirely
-  if (args.id) {
-    // Prefer token already resolved (flag or saved), fallback to env var
-    token = token || process.env.NOTION_TOKEN || null;
-
-    if (!token) {
-      p.log.error('No Notion token found. Set NOTION_TOKEN or save a token with the CLI (pagesdown -t <token>).');
-      process.exit(1);
+  // Headless mode: --source provided -> skip interactive prompts entirely
+  if (args.source || args.sourceClip) {
+    if (!args.source && args.sourceClip) {
+      try {
+        const proc = spawnSync('pbpaste', { encoding: 'utf8' });
+        if (proc.error) {
+          p.log.error('Failed to read clipboard.');
+          process.exit(1);
+        }
+        const clip = String(proc.stdout || '').trim();
+        if (!clip) {
+          p.log.error('Clipboard is empty.');
+          process.exit(1);
+        }
+        args.source = extractNotionId(clip);
+      } catch {
+        p.log.error('Failed to read clipboard.');
+        process.exit(1);
+      }
     }
 
-    // Connect and validate
     const spin = p.spinner();
     spin.start('Connecting to Notion...');
 
@@ -580,17 +584,17 @@ export async function main() {
     // Resolve target id (page or database) and fetch title
     let targetItem;
     try {
-      const page = await notion.getPage(args.id);
+      const page = await notion.getPage(args.source);
       const name = extractTitle(page) || 'Exported-Page';
-      if (name === 'Untitled') p.log.info(`Title lookup returned 'Untitled' for page ${args.id}; falling back to other heuristics.`);
-      targetItem = { id: args.id, name, type: 'page' };
+      if (name === 'Untitled') p.log.info(`Title lookup returned 'Untitled' for page ${args.source}; falling back to other heuristics.`);
+      targetItem = { id: args.source, name, type: 'page' };
     } catch (errPage) {
       try {
-        const db = await notion.getDatabase(args.id);
+        const db = await notion.getDatabase(args.source);
         const name = extractDatabaseTitle(db) || 'Exported-Database';
-        targetItem = { id: args.id, name, type: 'database' };
+        targetItem = { id: args.source, name, type: 'database' };
       } catch (errDb) {
-        p.log.error(`Could not fetch page or database with id "${args.id}". Ensure the ID is correct and shared with the integration.`);
+        p.log.error(`Could not fetch page or database with id "${args.source}". Ensure the ID is correct and shared with the integration.`);
         process.exit(1);
       }
     }
@@ -610,12 +614,8 @@ export async function main() {
     // Start download immediately with a single-item map
     spin.start('Starting download...');
 
-    // Map CLI `format` to download options
-    const chosenFormat = args.format || (args.type === 'csv' ? 'csv' : (args.flat ? 'markdown-flat' : 'markdown-tree'));
-    const dlOpts = { debug: args.debug };
-    if (chosenFormat === 'markdown-flat') { dlOpts.flat = true; dlOpts.type = 'markdown'; }
-    else if (chosenFormat === 'markdown-tree') { dlOpts.flat = false; dlOpts.type = 'markdown'; }
-    else if (chosenFormat === 'csv') { dlOpts.flat = false; dlOpts.type = 'csv'; }
+    const chosenFormat = args.format || 'markdown-tree';
+    const dlOpts = { format: chosenFormat, debug: args.debug, frontmatter: false };
 
     const stats = await downloadPages([ { id: targetItem.id, name: targetItem.name, type: targetItem.type } ], savePath, notion, {
       onStatus: (message) => spin.message(message),
@@ -810,11 +810,8 @@ export async function main() {
   spin.start('Starting download...');
 
   // Map CLI `format` to download options for interactive download
-  const chosenFormatInt = args.format || (args.type === 'csv' ? 'csv' : (args.flat ? 'markdown-flat' : 'markdown-tree'));
-  const dlOptsInt = { debug: args.debug };
-  if (chosenFormatInt === 'markdown-flat') { dlOptsInt.flat = true; dlOptsInt.type = 'markdown'; }
-  else if (chosenFormatInt === 'markdown-tree') { dlOptsInt.flat = false; dlOptsInt.type = 'markdown'; }
-  else if (chosenFormatInt === 'csv') { dlOptsInt.flat = false; dlOptsInt.type = 'csv'; }
+  const chosenFormatInt = args.format || 'markdown-tree';
+  const dlOptsInt = { format: chosenFormatInt, debug: args.debug, frontmatter: false };
 
   const stats = await downloadPages(selected, savePath, notion, {
     onStatus: (message) => spin.message(message),

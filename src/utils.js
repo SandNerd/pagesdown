@@ -194,3 +194,20 @@ export function slugifyFilename(title) {
 export async function ensureDir(dirPath) {
   await mkdir(dirPath, { recursive: true });
 }
+
+/**
+ * Safely merge plain objects into a new object while blocking prototype-pollution
+ * keys like __proto__, constructor, and prototype. Only copies own enumerable
+ * properties from source objects.
+ */
+export function safeMerge(...sources) {
+  const out = {};
+  for (const src of sources) {
+    if (!src || typeof src !== 'object') continue;
+    for (const key of Object.keys(src)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+      out[key] = src[key];
+    }
+  }
+  return out;
+}

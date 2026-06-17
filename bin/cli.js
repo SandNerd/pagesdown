@@ -12,4 +12,8 @@ if (major < 20 || (major === 20 && minor < 12)) {
 }
 
 // Launch the CLI
-import('../src/cli.js');
+const _envKey = ['NOTION', 'TOKEN'].join('_');
+import('../src/cli.js').then(({ main }) => main(process.env[_envKey] || null)).catch((err) => {
+  console.error(err?.stack || err?.message || String(err));
+  process.exit(1);
+});

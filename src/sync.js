@@ -11,27 +11,153 @@ import { markdownToNotionBlocks } from './parser.js';
 import fs from 'node:fs/promises';
 import { watch } from 'node:fs';
 
+// Normalize a manifest `target` so that a new `path` field is converted
+// into the legacy `outDir` and `filename` fields used throughout the code.
+function normalizeTarget(t) {
+  if (!t) return t;
+  if (typeof t.path === 'string' && String(t.path).trim()) {
+    const raw = String(t.path).trim();
+    const ext = path.extname(raw);
+    if (ext) {
+      t.outDir = path.dirname(raw) || '.';
+      t.filename = path.basename(raw);
+    } else {
+      t.outDir = raw || '.';
+      if (t.filename === undefined) delete t.filename;
+    }
+  }
+  return t;
+}
+
+// Helper: locate manifest entries that resolve to a given absolute local path.
+async function getManifestEntriesForPath(absoluteLocalPath) {
+  const results = [];
+  const candidates = [
+    { name: 'project', path: path.resolve(process.cwd(), 'pagesdown.config.json') },
+    { name: 'user', path: path.join(os.homedir(), '.pagesdown', 'config.json') },
+  ];
+
+  for (const c of candidates) {
+    try {
+      const raw = await fs.readFile(c.path, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const targets = parsed && Array.isArray(parsed.targets) ? parsed.targets : [];
+      const matches = [];
+      for (let i = 0; i < targets.length; i++) {
+        const t = targets[i];
+        if (!t) continue;
+        try {
+          normalizeTarget(t); // Centralize parsing
+          const pageId = extractNotionId(t.source || '');
+          const targetFilename = t.filename || `${slugifyFilename(t.name || pageId)}.md`;
+          const expandedOutDir = t.outDir && t.outDir.startsWith('~') 
+            ? path.join(process.env.HOME || os.homedir(), t.outDir.slice(1)) 
+            : t.outDir;
+          
+          const absPath = path.resolve(expandedOutDir || process.cwd(), targetFilename);
+          if (absPath === absoluteLocalPath) {
+            matches.push({ 
+              index: i, 
+              name: t.name || '<no-name>', 
+              filename: targetFilename, 
+              outDir: t.outDir || '<none>', 
+              source: t.source || '<none>' 
+            });
+          }
+        } catch (err) {}
+      }
+      if (matches.length > 0) results.push({ manifestPath: c.path, matches });
+    } catch (err) {
+      // missing/invalid manifest — ignore
+    }
+  }
+
+  return results;
+}
+
 async function pushLocalFileToNotion({ notion, pageId, targetItem, target, localOutputPath, currentLocalHash, ledger, saveStateLedgerFn }) {
   const localContent = await fs.readFile(localOutputPath, 'utf-8');
   // Safety: detect flattened markdown tables or embedded sub-page markers that
   // would indicate pushing this raw markdown could overwrite active database
   // structures in Notion. If detected, abort the push to protect live data.
+  // Structural preflight: check the live Notion canvas for rich structures
+  // (child_database or synced_block) that would be flattened by a raw push.
+  let remoteHasRichStructures = false;
   try {
-    const tablePattern = /\|\s*:?-{3,}[^\n]*\|/i; // matches | --- | or |:--- |
-    const subpagePattern = /\[\[.+\]\]|<!--\s*child_page|<!--\s*subpage|child_page|child_database/i;
-    if (tablePattern.test(localContent) || subpagePattern.test(localContent)) {
-      const overrideActive = target && (target.sync === 'push-override' || target.sync === 'two-way-override');
-      if (overrideActive) {
-        console.debug('[SAFETY] Table structural signatures found, but override sync option is active. Forcing push upstream.');
-      } else {
-        console.warn(`[SAFETY BYPASS] Aborting push for target "${targetItem.name || targetItem.id}". This file contains flattened inline tables or sub-pages. Pushing would destroy active database components in Notion. Set sync to \"push-override\"/\"two-way-override\" to force.`);
-        return null;
-      }
-    }
+    const remoteBlocks = await notion.getBlockChildren(pageId);
+    remoteHasRichStructures = Array.isArray(remoteBlocks) && remoteBlocks.some(
+      (block) => block && (block.type === 'child_database' || block.type === 'synced_block')
+    );
   } catch (err) {
-    // Non-fatal: if safety check fails for any reason, proceed with caution (do not block push)
+    // Fall back to safe false if block read permissions fail
   }
-  const blocks = markdownToNotionBlocks(localContent, localOutputPath);
+
+  if (remoteHasRichStructures) {
+    const hasForceFlag = process.argv.includes('--force') || process.argv.includes('-f');
+    if (!hasForceFlag) {
+      console.warn(`[SAFETY BYPASS] Aborting push for target page ID "${pageId}". The Notion canvas contains a live child_database or synced_block element that would be flattened into static text. Run the command with the '--force' flag to confirm this overwrite.`);
+      return null;
+    }
+    console.log(`[SAFETY] Remote rich structures detected, but --force flag is active. Proceeding with push.`);
+  }
+  const uploadContentRaw = await applyFrontmatterTarget(notion, pageId, target, localContent);
+
+  // Extract leading H1 to use as title and avoid body duplication
+  let uploadContent = uploadContentRaw;
+  let scanContent = uploadContent;
+  let fmMatch = null;
+  if (uploadContent.startsWith('---')) {
+    fmMatch = uploadContent.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+    if (fmMatch) {
+      scanContent = uploadContent.slice(fmMatch[0].length);
+    }
+  }
+
+  const bodyLines = scanContent.split('\n');
+  let h1Index = -1;
+  let extractedTitle = null;
+  for (let i = 0; i < bodyLines.length; i++) {
+    const trimmed = bodyLines[i].trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('# ')) {
+      h1Index = i;
+      extractedTitle = trimmed.slice(2).trim();
+    }
+    break;
+  }
+
+  if (extractedTitle) {
+    try {
+      const page = await notion.getPage(pageId);
+      let titleKey = 'title';
+      for (const [key, prop] of Object.entries(page.properties || {})) {
+        if (prop.type === 'title') {
+          titleKey = key;
+          break;
+        }
+      }
+
+      const currentTitle = extractTitle(page);
+      if (currentTitle !== extractedTitle) {
+        await notion.client.pages.update({
+          page_id: pageId,
+          properties: {
+            [titleKey]: {
+              title: [{ type: 'text', text: { content: extractedTitle } }],
+            },
+          },
+        });
+      }
+
+      // Remove H1 from body to prevent duplication
+      const newBody = bodyLines.filter((_, idx) => idx !== h1Index).join('\n');
+      uploadContent = (fmMatch ? fmMatch[0] : '') + newBody;
+    } catch (err) {
+      if (process.env.PAGESDOWN_DEBUG) console.error(`[DEBUG] Failed to sync H1 title: ${err.message}`);
+    }
+  }
+
+  const blocks = markdownToNotionBlocks(uploadContent, localOutputPath);
 
   await notion.clearPageContent(pageId);
   const appended = await notion.appendPageContent(pageId, blocks);
@@ -82,11 +208,157 @@ async function dependenciesChanged(notion, dependencies) {
   return snapshots.some((snapshot) => snapshot.changed);
 }
 
+function extractLeadingFrontmatter(localContent) {
+  if (typeof localContent !== 'string' || !localContent.startsWith('---')) {
+    return null;
+  }
+
+  const match = localContent.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    raw: match[1],
+    body: localContent.slice(match[0].length),
+  };
+}
+
+async function applyFrontmatterTarget(notion, pageId, target, localContent) {
+  const frontmatter = extractLeadingFrontmatter(localContent);
+
+  if (frontmatter && typeof target?.frontmatter === 'string') {
+    if (!notion?.client?.pages?.update) {
+      throw new Error('Notion client does not support frontmatter injection');
+    }
+
+    await notion.client.pages.update({
+      page_id: pageId,
+      properties: {
+        [target.frontmatter]: {
+          rich_text: [{ type: 'text', text: { content: frontmatter.raw } }],
+        },
+      },
+    });
+  }
+
+  if (frontmatter && target?.frontmatter !== true) {
+    return frontmatter.body;
+  }
+
+  return localContent;
+}
+
 /**
  * Execute batch sync from manifest targets
  */
 export async function executeSyncMode(manifest, token, args, overrides = {}) {
   const prompts = overrides.prompts || p;
+
+  // Manifest integrity guardrail: detect duplicate local outputs or multiple
+  // targets mapping to the same Notion ID with different filenames. Run this
+  // before doing any network work to avoid partial or destructive runs.
+  try {
+    const targets = (manifest && Array.isArray(manifest.targets)) ? manifest.targets : [];
+    // Ensure any new `path` fields are normalized via module-level helper
+    const seenLocalPaths = new Set();
+    const seenNotionIds = new Map();
+    for (const target of targets) {
+      normalizeTarget(target);
+      if (!target || target.disabled) continue;
+      let pageId = null;
+      try {
+        pageId = extractNotionId(target.source);
+      } catch (err) {
+        // Ignore invalid source here; it will be caught later during per-target
+        // validation when executing the sync loop.
+        continue;
+      }
+
+      const targetFilename = target.filename || `${slugifyFilename(target.name || pageId)}.md`;
+      const rawOutDir = target.outDir || process.cwd();
+      const expandedOutDir = rawOutDir && rawOutDir.startsWith('~') ? path.join(process.env.HOME || os.homedir(), rawOutDir.slice(1)) : rawOutDir;
+      const absoluteLocalPath = path.resolve(expandedOutDir || process.cwd(), targetFilename);
+
+      if (seenLocalPaths.has(absoluteLocalPath)) {
+        // Try to provide helpful origin info by scanning known manifest locations
+        const origins = await getManifestEntriesForPath(absoluteLocalPath);
+        let detailMsg = '\n';
+        if (origins.length > 0) {
+          detailMsg += 'Conflicting definitions found:';
+          for (const o of origins) {
+            const idxs = o.matches.map((m) => m.index).join(', ');
+            detailMsg += `\n - ${o.manifestPath}: targets[${idxs}]`;
+            for (const m of o.matches) {
+              detailMsg += `\n    - index ${m.index}: name=${m.name}, filename=${m.filename}, outDir=${m.outDir}, source=${m.source}`;
+            }
+          }
+        } else {
+          detailMsg += 'No manifest files located to show origins.';
+        }
+
+        prompts.log.error(`[CONFIG ERROR] Manifest target collision detected. Multiple targets are mapped to write to the same local file destination: "${absoluteLocalPath}". Sync aborted to protect local assets.${detailMsg}`);
+        return { completedTargets: [], failedTargets: [{ target, error: 'Local path collision' }] };
+      }
+      seenLocalPaths.add(absoluteLocalPath);
+
+      if (pageId && seenNotionIds.has(pageId) && seenNotionIds.get(pageId) !== targetFilename) {
+        // Provide helpful origin information where possible
+        const priorFilename = seenNotionIds.get(pageId);
+        let detailMsg = `\n - existing mapping: ${priorFilename}\n - current mapping: ${targetFilename}`;
+        try {
+          // attempt to enumerate manifests that map this pageId to filenames
+          const candidates = [path.resolve(process.cwd(), 'pagesdown.config.json'), path.join(os.homedir(), '.pagesdown', 'config.json')];
+          const found = [];
+          for (const cpath of candidates) {
+            try {
+              const raw = await fs.readFile(cpath, 'utf-8');
+              const parsed = JSON.parse(raw);
+              const targets = parsed && Array.isArray(parsed.targets) ? parsed.targets : [];
+              for (let i = 0; i < targets.length; i++) {
+                const t = targets[i];
+                if (!t) continue;
+                try {
+                  const pid = extractNotionId(t.source || '');
+                  if (String(pid) === String(pageId)) {
+                    let fn;
+                    if (typeof t.path === 'string' && String(t.path).trim()) {
+                      const pth = String(t.path).trim();
+                      const ext = path.extname(pth);
+                      fn = ext ? path.basename(pth) : `${slugifyFilename(t.name || pid)}.md`;
+                    } else {
+                      fn = t.filename || `${slugifyFilename(t.name || pid)}.md`;
+                    }
+                    found.push({ manifestPath: cpath, index: i, filename: fn, name: t.name || '<no-name>' });
+                  }
+                } catch (err) {}
+              }
+            } catch (err) {}
+          }
+          if (found.length > 0) {
+            detailMsg += '\nConflicting definitions found in manifests:';
+            for (const f of found) {
+              detailMsg += `\n - ${f.manifestPath}: targets[${f.index}] -> filename=${f.filename} (name=${f.name})`;
+            }
+          }
+        } catch (err) {
+          // ignore
+        }
+
+        prompts.log.error(`[CONFIG ERROR] Resource mapping collision detected. Notion page ID "${pageId}" is mapped to two separate local file outputs ("${seenNotionIds.get(pageId)}" and "${targetFilename}"). Sync aborted to prevent cloud asset clobbering.${detailMsg}`);
+        return { completedTargets: [], failedTargets: [{ target, error: 'Notion resource collision' }] };
+      }
+      if (pageId) seenNotionIds.set(pageId, targetFilename);
+    }
+  } catch (err) {
+    // Non-fatal: guardrail failures should not block sync unless they explicitly
+    // detected a collision and returned above. Continue if an unexpected error
+    // occurred during the preflight.
+  }
+
+  try {
+    process.stdin.setMaxListeners(0);
+  } catch (err) {}
 
   // Validate token
   if (!token) {
@@ -127,27 +399,91 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
   const groupFilter = args?.groupFilter || null;
 
   if (syncFilter || groupFilter) {
-    // Warn if some targets do not have `name` defined — helpful for targeted runs
-    const missingNameTargets = targets.filter((t) => !t || typeof t.name !== 'string' || t.name.trim() === '');
-    if (missingNameTargets.length > 0) {
-      prompts.log.warn('Tip: Some targets in your manifest are missing a `name` property. Add descriptive `name` values to enable targeted syncs by name or group.');
+    let filtered = targets;
+    let filterPageId = null;
+    let filterAbsoluteLocalPath = null;
+    let isFilterDirectory = false;
+
+    if (syncFilter) {
+      filterPageId = extractNotionId(syncFilter);
+      filterAbsoluteLocalPath = path.resolve(process.cwd(), syncFilter);
+      try {
+        const stats = await fs.stat(filterAbsoluteLocalPath);
+        if (stats.isDirectory()) {
+          isFilterDirectory = true;
+        }
+        // Normalize via realpath to eliminate symlink or trailing slash discrepancies
+        filterAbsoluteLocalPath = await fs.realpath(filterAbsoluteLocalPath);
+      } catch {
+        isFilterDirectory = false;
+      }
     }
 
-    let filtered = targets;
-    if (syncFilter) {
-      filtered = filtered.filter((t) => (t && (t.name === syncFilter || t.group === syncFilter)));
-    }
-    if (groupFilter) {
-      filtered = filtered.filter((t) => (t && t.group === groupFilter));
-    }
+    // Use an async-aware predicate so we can `realpath` target dirs when needed
+    filtered = await (async () => {
+      const checks = await Promise.all(filtered.map(async (t) => {
+        if (!t) return false;
+        if (groupFilter && t.group !== groupFilter) return false;
+        if (!syncFilter) return true;
+
+        const targetPageId = extractNotionId(t.source || '');
+        const targetFilename = t.filename || `${slugifyFilename(t.name || targetPageId)}.md`;
+
+        // Resolve and expand target directory
+        const rawOutDir = t.outDir || process.cwd();
+        const expandedOutDir = rawOutDir && typeof rawOutDir === 'string' && rawOutDir.startsWith('~')
+          ? path.join(process.env.HOME || os.homedir(), rawOutDir.slice(1))
+          : rawOutDir;
+
+        let targetDirAbsolute = path.resolve(expandedOutDir || process.cwd());
+        // Enforce realpath symmetry to prevent macOS path-matching failures:
+        try {
+          if (isFilterDirectory) {
+            targetDirAbsolute = await fs.realpath(targetDirAbsolute);
+          }
+        } catch {}
+
+        if (isFilterDirectory) {
+          try {
+            const rel = path.relative(filterAbsoluteLocalPath, targetDirAbsolute);
+            if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+              return true;
+            }
+          } catch {}
+          return t.group === syncFilter;
+        }
+
+        const targetAbsoluteLocalPath = path.resolve(targetDirAbsolute, targetFilename);
+
+        // Allow flexible matching: exact page/url, notion id, exact path,
+        // directory containment (handled above), filename/name prefix, or group.
+        const filenameMatches = typeof t.filename === 'string' && (t.filename === syncFilter || t.filename.startsWith(syncFilter));
+        const nameMatches = typeof t.name === 'string' && (t.name === syncFilter || String(t.name).toLowerCase().startsWith(String(syncFilter).toLowerCase()));
+        let pathPrefixMatches = false;
+        try {
+          if (typeof filterAbsoluteLocalPath === 'string' && typeof targetAbsoluteLocalPath === 'string') {
+            pathPrefixMatches = targetAbsoluteLocalPath === filterAbsoluteLocalPath || targetAbsoluteLocalPath.startsWith(filterAbsoluteLocalPath);
+          }
+        } catch {}
+
+        return (
+          t.source === syncFilter ||
+          targetPageId === filterPageId ||
+          pathPrefixMatches ||
+          filenameMatches ||
+          t.group === syncFilter ||
+          nameMatches
+        );
+      }));
+      return filtered.filter((_, i) => checks[i]);
+    })();
 
     if (!filtered || filtered.length === 0) {
       const filterText = syncFilter || groupFilter || '';
-      prompts.log.warn(`No targets found matching filter: "${filterText}". Check your pagesdown.config.json names.`);
+      prompts.log.warn(`No sync targets found matching filter: "${filterText}".`);
       spin.stop('Batch sync complete.');
       return { completedTargets: [], failedTargets: [] };
     }
-
     targets = filtered;
   }
   // Remove any targets explicitly marked as disabled in the manifest
@@ -196,6 +532,8 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
       continue;
     }
 
+    const identifier = target.name || target.filename || pageId;
+
     // Fetch page/database info
     let targetItem;
     try {
@@ -203,12 +541,12 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
       try {
         page = await notion.getPage(pageId);
         const name = extractTitle(page) || 'Exported-Page';
-        const remoteMtime = (target.sync === 'push-only' || target.sync === 'push-override') ? null : page?.last_edited_time || null;
+        const remoteMtime = (target.sync === 'push-only') ? null : page?.last_edited_time || null;
         targetItem = { id: pageId, name, type: 'page', customFilename: target.filename, remoteMtime };
       } catch {
         const db = await notion.getDatabase(pageId);
         const name = extractDatabaseTitle(db) || 'Exported-Database';
-        const remoteMtime = (target.sync === 'push-only' || target.sync === 'push-override') ? null : db?.last_edited_time || null;
+        const remoteMtime = (target.sync === 'push-only') ? null : db?.last_edited_time || null;
         targetItem = { id: pageId, name, type: 'database', customFilename: target.filename, remoteMtime };
       }
     } catch (err) {
@@ -273,9 +611,9 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
     }
 
     
-    if (target.sync === 'push-only' || target.sync === 'push-override') {
+    if (target.sync === 'push-only') {
       if (!resolvedCandidate) {
-        failedTargets.push({ target, error: `No local file found to upload for ${targetItem.name}` });
+        failedTargets.push({ target, error: `No local file found to upload for ${identifier}` });
         continue;
       }
 
@@ -287,7 +625,6 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
         continue;
       }
 
-      
       if (resolvedCandidate.record && currentLocalHash === resolvedCandidate.record.last_synced_local_hash) {
         prompts.log.info(`[Up to date] ${path.basename(resolvedCandidate.candidate)} (skipped)`);
         completedTargets.push({ target, item: targetItem, skipped: true });
@@ -295,7 +632,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
       }
 
       spin.stop('');
-      prompts.log.info(`[Uploading] Syncing local edits back to Notion for ${targetItem.name}...`);
+      prompts.log.info(`[Uploading] Syncing local edits back to Notion for ${identifier}...`);
       spin.start('...');
 
       try {
@@ -309,9 +646,9 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
               ledger,
               saveStateLedgerFn,
             });
-        if (!appended) {
+        if (appended === null) {
           // Safety bypass or early abort occurred inside pushLocalFileToNotion.
-          prompts.log.warn(`[SAFETY] Push aborted for ${targetItem.name}. Skipping target.`);
+          prompts.log.warn(`[SAFETY] Push aborted for ${identifier}. Skipping target.`);
           completedTargets.push({ target, item: targetItem, skipped: true, reason: 'safety-bypass' });
           continue;
         }
@@ -376,15 +713,24 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
 
     // Two-way sync detection: check if local edits need to be pushed to Notion
     let pushedTwoWay = false;
-    if ((target.sync === 'two-way' || target.sync === 'two-way-override') && useLedger && ledger.byNotionId && ledger.byNotionId[pageId]) {
-      const recordEntry = ledger.byNotionId[pageId];
-      // Find the output path from the ledger
+    if (target.sync === 'two-way') {
+      // Initialize safe defaults so brand-new/untracked targets are evaluated
       let localOutputPath = null;
-      let ledgerRecord = null;
-      for (const [outputPath, record] of Object.entries(recordEntry.outputs || {})) {
-        localOutputPath = path.resolve(outputPath);
-        ledgerRecord = record;
-        break;
+      let ledgerRecord = { last_synced_local_hash: '', last_synced_remote_mtime: '' };
+
+      // Look up historical records if they exist in the ledger
+      if (useLedger && ledger.byNotionId?.[pageId]?.outputs) {
+        for (const [outputPath, record] of Object.entries(ledger.byNotionId[pageId].outputs)) {
+          localOutputPath = path.resolve(outputPath);
+          ledgerRecord = record;
+          break;
+        }
+      }
+
+      // Fallback: If no history exists, dynamically infer the path from target criteria
+      if (!localOutputPath) {
+        const targetFilename = target.filename || `${slugifyFilename(targetItem.name || pageId)}.md`;
+        localOutputPath = path.resolve(target.outDir || process.cwd(), targetFilename);
       }
 
       if (localOutputPath && ledgerRecord) {
@@ -392,14 +738,15 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
           // Check if the local file exists
           await fs.stat(localOutputPath);
           const currentLocalHash = await calculateFileHash(localOutputPath);
-          const remoteHasChanged = dependencyMismatch || String(targetItem.remoteMtime) !== String(ledgerRecord.last_synced_remote_mtime);
+
           const localHasChanged = currentLocalHash !== ledgerRecord.last_synced_local_hash;
+          const remoteHasChanged = dependencyMismatch || String(targetItem.remoteMtime) !== String(ledgerRecord.last_synced_remote_mtime);
           const conflictDetected = localHasChanged && remoteHasChanged;
 
-          if (localHasChanged && !remoteHasChanged) {
-            // Local modification detected, remote unchanged — push back to Notion
+          if ((localHasChanged && !remoteHasChanged) || (localHasChanged && target.conflict === 'local-wins')) {
+            // FORCE AN UPLOAD IMMEDIATELY
             spin.stop('');
-            prompts.log.info(`[Pushing] Syncing local edits back to Notion for ${targetItem.name}...`);
+            prompts.log.info(`[Force Push] Override token found or local edits updated. Pushing back to Notion...`);
             spin.start('...');
 
             try {
@@ -413,15 +760,15 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
                 ledger,
                 saveStateLedgerFn,
               });
-              if (!appended) {
-                prompts.log.warn(`[SAFETY] Push aborted for ${targetItem.name}. Skipping target.`);
-                completedTargets.push({ target, item: targetItem, skipped: true, reason: 'safety-bypass' });
-              } else {
-                prompts.log.info(`[Pushed] Successfully synced local edits to Notion for ${targetItem.name}`);
-                pushedTwoWay = true;
-                completedTargets.push({ target, item: targetItem, pushed: true });
-              }
-              pushedTwoWay = true;
+
+                    if (appended === null) {
+                      prompts.log.warn(`[SAFETY] Push aborted for ${identifier}. Skipping target.`);
+                      completedTargets.push({ target, item: targetItem, skipped: true, reason: 'safety-bypass' });
+                    } else {
+                      prompts.log.info(`[Uploaded] Successfully synced ${appended} block(s) to Notion for bidirectional target "${identifier}"`);
+                      pushedTwoWay = true;
+                      completedTargets.push({ target, item: targetItem, pushed: true });
+                    }
             } catch (err) {
               spin.stop('');
               prompts.log.warn(`[Push Failed] Could not sync local edits: ${err.message}`);
@@ -431,7 +778,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
             const conflictPolicy = target.conflict === 'local-wins' ? 'local-wins' : 'notion-wins';
             if (conflictPolicy === 'local-wins') {
               spin.stop('');
-              prompts.log.warn(`[Conflict] Local and Notion both changed for ${targetItem.name}; local-wins will overwrite the cloud copy.`);
+              prompts.log.warn(`[Conflict] Local and Notion both changed for ${identifier}; local-wins will overwrite the cloud copy.`);
               spin.start('...');
 
               try {
@@ -444,11 +791,11 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
                   ledger,
                   saveStateLedgerFn,
                 });
-                if (!appended) {
-                  prompts.log.warn(`[SAFETY] Push aborted for ${targetItem.name}. Skipping target.`);
+                if (appended === null) {
+                  prompts.log.warn(`[SAFETY] Push aborted for ${identifier}. Skipping target.`);
                   completedTargets.push({ target, item: targetItem, skipped: true, reason: 'safety-bypass' });
                 } else {
-                  prompts.log.info(`[Pushed] Successfully resolved conflict by overwriting Notion for ${targetItem.name}`);
+                  prompts.log.info(`[Pushed] Successfully resolved conflict by overwriting Notion for ${identifier}`);
                   pushedTwoWay = true;
                   completedTargets.push({ target, item: targetItem, pushed: true });
                 }
@@ -458,7 +805,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
                 spin.start('Continuing...');
               }
             } else {
-              prompts.log.warn(`[Conflict] Local and Notion both changed for ${targetItem.name}; pulling Notion version to preserve cloud edits.`);
+              prompts.log.warn(`[Conflict] Local and Notion both changed for ${identifier}; pulling Notion version to preserve cloud edits.`);
             }
           }
         } catch (err) {
@@ -471,23 +818,8 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
 
     // Download the target
       try {
-      // Map `format` to downloader options
       const format = target.format || 'markdown-tree';
-      const downloadOpts = { debug: args.debug };
-      if (format === 'markdown-flat') {
-        downloadOpts.flat = true;
-        downloadOpts.type = 'markdown';
-      } else if (format === 'markdown-tree') {
-        downloadOpts.flat = false;
-        downloadOpts.type = 'markdown';
-      } else if (format === 'csv') {
-        downloadOpts.flat = false;
-        downloadOpts.type = 'csv';
-      } else {
-        // Fallback to markdown tree
-        downloadOpts.flat = false;
-        downloadOpts.type = 'markdown';
-      }
+      const downloadOpts = { format, debug: args.debug, frontmatter: target.frontmatter !== undefined ? target.frontmatter : false };
 
       const stats = await downloadFn(
         [targetItem],
@@ -539,7 +871,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
       }
 
       completedTargets.push({ target, item: targetItem });
-      spin.start(`${prefix} Done: ${targetItem.name}`);
+      spin.start(`${prefix} Done: ${identifier}`);
     } catch (err) {
       failedTargets.push({ target, error: err.message });
     }
@@ -574,6 +906,99 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
   const prompts = overrides.prompts || p;
   const fs = overrides.fs || (await import('fs/promises'));
 
+  // Manifest integrity guardrail for status: run basic duplicate checks
+  // before making network calls to Notion.
+  try {
+    const targets = (manifest && Array.isArray(manifest.targets)) ? manifest.targets : [];
+    // Normalize `path` into `outDir`/`filename` for parity with executeSyncMode
+    for (const t of targets) normalizeTarget(t);
+    const seenLocalPaths = new Set();
+    const seenNotionIds = new Map();
+    for (const target of targets) {
+      if (!target || target.disabled) continue;
+      let pageId = null;
+      try {
+        pageId = extractNotionId(target.source);
+      } catch (err) {
+        continue;
+      }
+
+      const targetFilename = target.filename || `${slugifyFilename(target.name || pageId)}.md`;
+      const rawOutDir = target.outDir || process.cwd();
+      const expandedOutDir = rawOutDir && rawOutDir.startsWith('~') ? path.join(process.env.HOME || os.homedir(), rawOutDir.slice(1)) : rawOutDir;
+      const absoluteLocalPath = path.resolve(expandedOutDir || process.cwd(), targetFilename);
+
+      if (seenLocalPaths.has(absoluteLocalPath)) {
+        const origins = await getManifestEntriesForPath(absoluteLocalPath);
+        let detailMsg = '\n';
+        if (origins.length > 0) {
+          detailMsg += 'Conflicting definitions found:';
+          for (const o of origins) {
+            const idxs = o.matches.map((m) => m.index).join(', ');
+            detailMsg += `\n - ${o.manifestPath}: targets[${idxs}]`;
+            for (const m of o.matches) {
+              detailMsg += `\n    - index ${m.index}: name=${m.name}, filename=${m.filename}, outDir=${m.outDir}, source=${m.source}`;
+            }
+          }
+        } else {
+          detailMsg += 'No manifest files located to show origins.';
+        }
+
+        prompts.log.error(`[CONFIG ERROR] Manifest target collision detected. Multiple targets are mapped to write to the same local file destination: "${absoluteLocalPath}". Status aborted to protect local assets.${detailMsg}`);
+        return { results: [] };
+      }
+      seenLocalPaths.add(absoluteLocalPath);
+
+      if (pageId && seenNotionIds.has(pageId) && seenNotionIds.get(pageId) !== targetFilename) {
+        const priorFilename = seenNotionIds.get(pageId);
+        let detailMsg = `\n - existing mapping: ${priorFilename}\n - current mapping: ${targetFilename}`;
+        try {
+          const candidates = [path.resolve(process.cwd(), 'pagesdown.config.json'), path.join(os.homedir(), '.pagesdown', 'config.json')];
+          const found = [];
+          for (const cpath of candidates) {
+            try {
+              const raw = await fs.readFile(cpath, 'utf-8');
+              const parsed = JSON.parse(raw);
+              const targets = parsed && Array.isArray(parsed.targets) ? parsed.targets : [];
+              for (let i = 0; i < targets.length; i++) {
+                const t = targets[i];
+                if (!t) continue;
+                try {
+                  const pid = extractNotionId(t.source || '');
+                  if (String(pid) === String(pageId)) {
+                    let fn;
+                    if (typeof t.path === 'string' && String(t.path).trim()) {
+                      const pth = String(t.path).trim();
+                      const ext = path.extname(pth);
+                      fn = ext ? path.basename(pth) : `${slugifyFilename(t.name || pid)}.md`;
+                    } else {
+                      fn = t.filename || `${slugifyFilename(t.name || pid)}.md`;
+                    }
+                    found.push({ manifestPath: cpath, index: i, filename: fn, name: t.name || '<no-name>' });
+                  }
+                } catch (err) {}
+              }
+            } catch (err) {}
+          }
+          if (found.length > 0) {
+            detailMsg += '\nConflicting definitions found in manifests:';
+            for (const f of found) {
+              detailMsg += `\n - ${f.manifestPath}: targets[${f.index}] -> filename=${f.filename} (name=${f.name})`;
+            }
+          }
+        } catch (err) {
+          // ignore
+        }
+
+        prompts.log.error(`[CONFIG ERROR] Resource mapping collision detected. Notion page ID "${pageId}" is mapped to two separate local file outputs ("${seenNotionIds.get(pageId)}" and "${targetFilename}"). Status aborted to prevent cloud asset clobbering.${detailMsg}`);
+        return { results: [] };
+      }
+      if (pageId) seenNotionIds.set(pageId, targetFilename);
+    }
+  } catch (err) {
+    // Continue on unexpected errors during preflight
+  }
+
   if (!manifest || !Array.isArray(manifest.targets) || manifest.targets.length === 0) {
     prompts.log.error('No sync targets found in manifest.');
     return { results: [] };
@@ -605,29 +1030,83 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
   const groupFilter = args?.groupFilter || null;
 
   if (statusFilter || groupFilter) {
-    const missingNameTargets = targets.filter((t) => !t || typeof t.name !== 'string' || t.name.trim() === '');
-    if (missingNameTargets.length > 0) {
-      prompts.log.warn('Tip: Some targets in your manifest are missing a `name` property. Add descriptive `name` values to enable targeted status checks by name or group.');
+    let filtered = targets;
+    let filterPageId = null;
+    let filterAbsoluteLocalPath = null;
+    let isFilterDirectory = false;
+
+    if (statusFilter) {
+      filterPageId = extractNotionId(statusFilter);
+      filterAbsoluteLocalPath = path.resolve(process.cwd(), statusFilter);
+      try {
+        const stats = await fs.stat(filterAbsoluteLocalPath);
+        if (stats.isDirectory()) isFilterDirectory = true;
+        filterAbsoluteLocalPath = await fs.realpath(filterAbsoluteLocalPath);
+      } catch {
+        isFilterDirectory = false;
+      }
     }
 
-    let filtered = targets;
-    if (statusFilter) {
-      const q = String(statusFilter).toLowerCase();
-      filtered = filtered.filter((t) => {
+    // Async-aware filtering so directory comparisons can use realpath
+    filtered = await (async () => {
+      const checks = await Promise.all(filtered.map(async (t) => {
         if (!t) return false;
-        const n = (t.name || '').toLowerCase();
-        const g = (t.group || '').toLowerCase();
-        return n.includes(q) || g.includes(q);
-      });
-    }
-    if (groupFilter) {
-      const gq = String(groupFilter).toLowerCase();
-      filtered = filtered.filter((t) => t && String(t.group || '').toLowerCase() === gq);
-    }
+        if (groupFilter && t.group !== groupFilter) return false;
+        if (!statusFilter) return true;
+
+        const targetPageId = extractNotionId(t.source || '');
+        const targetFilename = t.filename || `${slugifyFilename(t.name || targetPageId)}.md`;
+
+        // Resolve and expand target directory
+        const rawOutDir = t.outDir || process.cwd();
+        const expandedOutDir = rawOutDir && rawOutDir.startsWith('~')
+          ? path.join(process.env.HOME || os.homedir(), rawOutDir.slice(1))
+          : rawOutDir;
+
+        let targetDirAbsolute = path.resolve(expandedOutDir || process.cwd());
+        // Enforce realpath symmetry to prevent macOS path-matching failures:
+        try {
+          if (isFilterDirectory) {
+            targetDirAbsolute = await fs.realpath(targetDirAbsolute);
+          }
+        } catch {}
+
+        if (isFilterDirectory) {
+          try {
+            const rel = path.relative(filterAbsoluteLocalPath, targetDirAbsolute);
+            if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+              return true;
+            }
+          } catch {}
+          return t.group === statusFilter;
+        }
+
+        const targetAbsoluteLocalPath = path.resolve(targetDirAbsolute, targetFilename);
+
+        const filenameMatches = typeof t.filename === 'string' && (t.filename === statusFilter || t.filename.startsWith(statusFilter));
+        const nameMatches = typeof t.name === 'string' && (t.name === statusFilter || String(t.name).toLowerCase().startsWith(String(statusFilter).toLowerCase()));
+        let pathPrefixMatches = false;
+        try {
+          if (typeof filterAbsoluteLocalPath === 'string' && typeof targetAbsoluteLocalPath === 'string') {
+            pathPrefixMatches = targetAbsoluteLocalPath === filterAbsoluteLocalPath || targetAbsoluteLocalPath.startsWith(filterAbsoluteLocalPath);
+          }
+        } catch {}
+
+        return (
+          t.source === statusFilter ||
+          targetPageId === filterPageId ||
+          pathPrefixMatches ||
+          filenameMatches ||
+          t.group === statusFilter ||
+          nameMatches
+        );
+      }));
+      return filtered.filter((_, i) => checks[i]);
+    })();
 
     if (!filtered || filtered.length === 0) {
       const filterText = statusFilter || groupFilter || '';
-      prompts.log.warn(`No targets found matching filter: "${filterText}". Check your pagesdown.config.json names.`);
+      prompts.log.warn(`No sync targets found matching filter: "${filterText}".`);
       return { results: [], counts };
     }
 
@@ -852,10 +1331,12 @@ function buildFileTargetMap(manifest, ledger) {
   const targets = manifest.targets || [];
   
   for (const target of targets) {
+    if (!target) continue;
+    normalizeTarget(target); // Fix watch capability for path-only targets
     // Only watch files for two-way or push-only targets
     if (target.disabled === true) continue;
     // Watch targets that can push upstream
-    if (!target.sync || (target.sync !== 'two-way' && target.sync !== 'two-way-override' && target.sync !== 'push-only' && target.sync !== 'push-override')) {
+    if (!target.sync || (target.sync !== 'two-way' && target.sync !== 'push-only')) {
       continue;
     }
     
@@ -890,24 +1371,32 @@ async function pushSingleFileToNotionWatched({ notion, pageId, filePath, ledger,
     const localContent = await fs.readFile(filePath, 'utf-8');
     const currentHash = await calculateFileHash(filePath);
     
-    // Apply safety check
+    // Structural preflight: check the live Notion canvas for rich structures
+    // (child_database or synced_block) that would be flattened by a raw push.
     try {
-      const tablePattern = /\|\s*:?-{3,}[^\n]*\|/i;
-      const subpagePattern = /\[\[.+\]\]|<!--\s*child_page|<!--\s*subpage|child_page|child_database/i;
-      if (tablePattern.test(localContent) || subpagePattern.test(localContent)) {
-        const overrideActive = target && (target.sync === 'push-override' || target.sync === 'two-way-override');
-        if (overrideActive) {
-          console.debug('[SAFETY] Table structural signatures found, but override sync option is active. Forcing push upstream.');
-        } else {
-          prompts.log.warn(`[SAFETY] Aborting push for ${path.basename(filePath)}. File contains flattened tables or sub-pages.`);
+      let remoteHasRichStructures = false;
+      try {
+        const remoteBlocks = await notion.getBlockChildren(pageId);
+        remoteHasRichStructures = Array.isArray(remoteBlocks) && remoteBlocks.some(
+          (block) => block && (block.type === 'child_database' || block.type === 'synced_block')
+        );
+      } catch (err) {
+        // Fall back to safe false if block read permissions fail
+      }
+
+      if (remoteHasRichStructures) {
+        const hasForceFlag = process.argv.includes('--force') || process.argv.includes('-f');
+        if (!hasForceFlag) {
+          prompts.log.warn(`[SAFETY] Aborting push for ${path.basename(filePath)}. Remote Notion canvas contains child_database or synced_block; run with --force to override.`);
           return false;
         }
+        prompts.log.info(`[SAFETY] Remote rich structures detected, but --force flag present. Proceeding with push for ${path.basename(filePath)}.`);
       }
     } catch {
       // Non-fatal
     }
-    
-    const blocks = markdownToNotionBlocks(localContent, filePath);
+    const uploadContent = await applyFrontmatterTarget(notion, pageId, target, localContent);
+    const blocks = markdownToNotionBlocks(uploadContent, filePath);
     await notion.clearPageContent(pageId);
     const appended = await notion.appendPageContent(pageId, blocks);
     const refreshedPage = await notion.getPage(pageId);

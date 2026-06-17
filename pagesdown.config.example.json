@@ -1,0 +1,19 @@
+{
+  "token": "ntn_xxx_local_override",
+  "defaultOutputDir": "./exports",
+  "targets": [
+    {
+      "source": "https://www.notion.so/My-Page-abcdef1234567890abcdef1234567890",
+      "path": "./docs/my-page/main",
+      "format": "markdown-tree",
+      "sync": "pull-only",
+      "conflict": "notion-wins",
+      "disabled": false
+    },
+    {
+      "source": "abcdef1234567890abcdef1234567890ab",
+      "path": "./exports/database",
+      "format": "flattened"
+    }
+  ]
+}
