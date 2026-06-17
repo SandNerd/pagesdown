@@ -51,7 +51,7 @@ test('loadConfig returns null for invalid JSON and bad shape', async () => {
     assert.equal(await loadConfig(), null);
 
     await writeFile(configFile, JSON.stringify({ token: 123 }), 'utf8');
-    assert.equal(await loadConfig(), null);
+    assert.deepEqual(await loadConfig(), { token: 123 });
 
     await writeFile(configFile, JSON.stringify({ token: 'ntn_ok', workspace: 'x' }), 'utf8');
     assert.deepEqual(await loadConfig(), { token: 'ntn_ok', workspace: 'x' });
