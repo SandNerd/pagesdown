@@ -20,7 +20,7 @@ function createNoopPrompts() {
 
 test('executeSyncMode: polymorphic filter matches absolute path', async () => {
   const originalCwd = process.cwd();
-  const dir = fs.realpathSync(await mkdtemp(path.join(tmpdir(), 'pagesdown-path-filter-test-')));
+  const dir = fs.realpathSync(await mkdtemp(path.join(tmpdir(), 'notiondrive-path-filter-test-')));
   try {
     process.chdir(dir);
 
@@ -84,7 +84,7 @@ test('executeSyncMode: polymorphic filter matches absolute path', async () => {
 
 test('executeSyncMode: directory filter matches all targets in a directory', async () => {
   const originalCwd = process.cwd();
-  const dir = fs.realpathSync(await mkdtemp(path.join(tmpdir(), 'pagesdown-path-filter-dir-test-')));
+  const dir = fs.realpathSync(await mkdtemp(path.join(tmpdir(), 'notiondrive-path-filter-dir-test-')));
   try {
     process.chdir(dir);
 
@@ -134,7 +134,7 @@ test('executeSyncMode: directory filter matches all targets in a directory', asy
 
 test('executeSyncMode: prefix filter matches filenames and names', async () => {
   const originalCwd = process.cwd();
-  const dir = fs.realpathSync(await mkdtemp(path.join(tmpdir(), 'pagesdown-prefix-filter-test-')));
+  const dir = fs.realpathSync(await mkdtemp(path.join(tmpdir(), 'notiondrive-prefix-filter-test-')));
   try {
     process.chdir(dir);
 

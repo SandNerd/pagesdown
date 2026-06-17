@@ -14,7 +14,7 @@ function createNoopHooks() {
 }
 
 test('downloadPages exports one RFC4180 CSV per database and resolves relations', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-csv-test-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-csv-test-'));
 
   try {
     const notion = {
@@ -65,7 +65,7 @@ test('downloadPages exports one RFC4180 CSV per database and resolves relations'
 });
 
 test('downloadPages keeps markdown database behavior by default', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-md-test-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-md-test-'));
 
   try {
     const notion = {
@@ -103,7 +103,7 @@ test('downloadPages keeps markdown database behavior by default', async () => {
 });
 
 test('downloadPages exports a flat markdown database as a single table file', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-flat-md-test-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-flat-md-test-'));
 
   try {
     const notion = {
@@ -147,7 +147,7 @@ test('downloadPages exports a flat markdown database as a single table file', as
 });
 
 test('downloadPages supports string-based frontmatter from properties', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-fm-str-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-fm-str-'));
   try {
     const notion = {
       throttledClient: {},
@@ -202,7 +202,7 @@ test('downloadPages supports string-based frontmatter from properties', async ()
 });
 
 test('downloadDatabase supported string-based frontmatter for rows', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-db-fm-str-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-db-fm-str-'));
   try {
     const notion = {
       throttledClient: {},

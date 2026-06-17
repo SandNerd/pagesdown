@@ -19,7 +19,7 @@ function createNoopPrompts() {
 
 test('executeSyncMode returns completedTargets when skip matches ledger', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-sync-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-sync-test-'));
   try {
     process.chdir(dir);
 
@@ -39,7 +39,7 @@ test('executeSyncMode returns completedTargets when skip matches ledger', async 
       byNotionId: { [pageId]: { notion_id: pageId, outputs: { [rel]: { last_synced_remote_mtime: '2025-01-01T00:00:00.000Z', last_synced_local_hash: hash } } } },
       byPath: { [rel]: pageId },
     };
-    await writeFile('.pagesdown-state.json', JSON.stringify(ledger, null, 2), 'utf8');
+    await writeFile('.notiondrive-state.json', JSON.stringify(ledger, null, 2), 'utf8');
 
     class MockNotion {
       async validateToken() {}
@@ -66,7 +66,7 @@ test('executeSyncMode returns completedTargets when skip matches ledger', async 
 
 test('upload targets with markdown tables are aborted unless override sync is active', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-safety-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-safety-test-'));
   try {
     process.chdir(dir);
 
@@ -113,7 +113,7 @@ test('upload targets with markdown tables are aborted unless override sync is ac
 
 test('upload targets with markdown tables are pushed when override sync is active', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-safety-override-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-safety-override-test-'));
   try {
     process.chdir(dir);
 
@@ -161,7 +161,7 @@ test('upload targets with markdown tables are pushed when override sync is activ
 
 test('upload-only targets skip when local hash matches ledger', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-sync-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-sync-test-'));
   try {
     process.chdir(dir);
 
@@ -213,7 +213,7 @@ test('upload-only targets skip when local hash matches ledger', async () => {
 
 test('upload-only targets overwrite Notion when local hash changes', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-sync-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-sync-test-'));
   try {
     process.chdir(dir);
 
@@ -271,7 +271,7 @@ test('upload-only targets overwrite Notion when local hash changes', async () =>
 
 test('push uploads strip frontmatter from body when frontmatter is defaulted off', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-frontmatter-strip-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-frontmatter-strip-test-'));
   try {
     process.chdir(dir);
 
@@ -313,7 +313,7 @@ test('push uploads strip frontmatter from body when frontmatter is defaulted off
 
 test('push uploads inject frontmatter into configured database property and strip it from body', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-frontmatter-inject-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-frontmatter-inject-test-'));
   try {
     process.chdir(dir);
 
@@ -357,7 +357,7 @@ test('push uploads inject frontmatter into configured database property and stri
 });
 
 test('two-way sync pushes to Notion and returns completedTargets', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-two-way-test-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-two-way-test-'));
 
   const notion = {
     validateToken: async () => {},
@@ -420,7 +420,7 @@ test('two-way sync pushes to Notion and returns completedTargets', async () => {
 });
 
 test('two-way sync does not push when remote changed', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-two-way-test-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-two-way-test-'));
 
   const notion = {
     validateToken: async () => {},
@@ -486,7 +486,7 @@ test('two-way sync does not push when remote changed', async () => {
 });
 
 test('two-way sync local-wins conflicts overwrite Notion', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-two-way-test-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-two-way-test-'));
 
   let downloadCalled = false;
   const notion = {
@@ -575,7 +575,7 @@ test('executeSyncMode returns completedTargets and failedTargets arrays', async 
 
 test('flat targets still skip when no nested dependencies are tracked', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-flat-cache-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-flat-cache-test-'));
   try {
     process.chdir(dir);
 
@@ -632,7 +632,7 @@ test('flat targets still skip when no nested dependencies are tracked', async ()
 
 test('targets with dependency changes bypass cache skip and re-download even when ledger matches', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-dependency-cache-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-dependency-cache-test-'));
   try {
     process.chdir(dir);
 
@@ -708,7 +708,7 @@ test('targets with dependency changes bypass cache skip and re-download even whe
 });
 test('pushing markdown with H1 at the top updates Notion title and strips H1 from body', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-h1-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-h1-test-'));
   try {
     process.chdir(dir);
 
@@ -760,7 +760,7 @@ test('pushing markdown with H1 at the top updates Notion title and strips H1 fro
 
 test('H1 extraction works correctly with frontmatter: true', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-h1-fm-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-h1-fm-test-'));
   try {
     process.chdir(dir);
 

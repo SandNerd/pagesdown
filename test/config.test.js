@@ -13,7 +13,7 @@ async function importConfigWithHome(home) {
 }
 
 test('loadConfig returns null when config is missing', async () => {
-  const home = await mkdtemp(path.join(tmpdir(), 'pagesdown-home-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'notiondrive-home-'));
   try {
     const { loadConfig } = await importConfigWithHome(home);
     const config = await loadConfig();
@@ -24,7 +24,7 @@ test('loadConfig returns null when config is missing', async () => {
 });
 
 test('saveConfig persists and loadConfig reads valid token config', async () => {
-  const home = await mkdtemp(path.join(tmpdir(), 'pagesdown-home-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'notiondrive-home-'));
   try {
     const { saveConfig, loadConfig } = await importConfigWithHome(home);
     const input = { token: 'ntn_test', workspace: 'ws', defaultOutputDir: '/tmp/x' };
@@ -38,15 +38,15 @@ test('saveConfig persists and loadConfig reads valid token config', async () => 
 });
 
 test('loadConfig returns null for invalid JSON and bad shape', async () => {
-  const home = await mkdtemp(path.join(tmpdir(), 'pagesdown-home-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'notiondrive-home-'));
   try {
-    const pagesdownDir = path.join(home, '.pagesdown');
+    const notiondriveDir = path.join(home, '.notiondrive');
     await writeFile(path.join(home, 'seed.txt'), 'ok', 'utf8');
 
     const { loadConfig, saveConfig } = await importConfigWithHome(home);
     await saveConfig({ token: 'ntn_seed' });
 
-    const configFile = path.join(pagesdownDir, 'config.json');
+    const configFile = path.join(notiondriveDir, 'config.json');
     await writeFile(configFile, '{ invalid', 'utf8');
     assert.equal(await loadConfig(), null);
 
@@ -63,9 +63,9 @@ test('loadConfig returns null for invalid JSON and bad shape', async () => {
   }
 });
 
-test('loadProjectConfig reads local pagesdown.config.json', async () => {
-  const home = await mkdtemp(path.join(tmpdir(), 'pagesdown-home-'));
-  const cwd = await mkdtemp(path.join(tmpdir(), 'pagesdown-cwd-'));
+test('loadProjectConfig reads local notiondrive.config.json', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'notiondrive-home-'));
+  const cwd = await mkdtemp(path.join(tmpdir(), 'notiondrive-cwd-'));
   const originalCwd = process.cwd();
   try {
     const { loadProjectConfig } = await importConfigWithHome(home);
@@ -76,7 +76,7 @@ test('loadProjectConfig reads local pagesdown.config.json', async () => {
       defaultOutputDir: './exports',
       targets: [{ source: 'https://notion.so/page', outDir: './exports' }],
     };
-    await writeFile(path.join(cwd, 'pagesdown.config.json'), JSON.stringify(input), 'utf8');
+    await writeFile(path.join(cwd, 'notiondrive.config.json'), JSON.stringify(input), 'utf8');
 
     const loaded = await loadProjectConfig();
     assert.deepEqual(loaded, input);
@@ -88,7 +88,7 @@ test('loadProjectConfig reads local pagesdown.config.json', async () => {
 });
 
 test('project config precedence overrides saved config values', async () => {
-  const home = await mkdtemp(path.join(tmpdir(), 'pagesdown-home-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'notiondrive-home-'));
   try {
     const { resolveConfigSources } = await import(`../src/cli.js?resolve=${Date.now()}-${Math.random()}`);
     const resolved = resolveConfigSources(

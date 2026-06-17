@@ -19,7 +19,7 @@ function createNoopPrompts() {
 
 test('disabled targets are ignored during sync', async () => {
   const originalCwd = process.cwd();
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-disabled-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-disabled-test-'));
   try {
     process.chdir(dir);
 

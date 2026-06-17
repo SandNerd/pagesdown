@@ -534,10 +534,10 @@ async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors, 
       }
 
       const wrapped =
-        `<!-- pagesdown:subpage:start -->${anchorId}\n` +
+        `<!-- notiondrive:subpage:start -->${anchorId}\n` +
         `### Sub-Page Content: ${childTitle}\n\n` +
         (childMarkdown ? `${childMarkdown}\n\n` : '') +
-        `<!-- pagesdown:subpage:end -->\n\n`;
+        `<!-- notiondrive:subpage:end -->\n\n`;
 
       return { type: 'parts', parts: [{ type: 'raw', content: wrapped }] };
     }

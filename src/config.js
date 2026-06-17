@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-const CONFIG_DIR = path.join(os.homedir(), '.pagesdown');
+const CONFIG_DIR = path.join(os.homedir(), '.notiondrive');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 /**
@@ -14,8 +14,9 @@ export async function loadConfig() {
     const parsed = JSON.parse(data);
     // Apply manifest flattening so callers can rely on `targets` uniformly
     const flattened = flattenManifest(parsed);
-    // Validate shape — token must be a string if present
-    if (flattened && typeof flattened === 'object' && typeof flattened.token === 'string') {
+    // Return the parsed config object (may or may not include a token).
+    // Callers will handle absence of token separately.
+    if (flattened && typeof flattened === 'object') {
       return flattened;
     }
     return null;
@@ -25,11 +26,11 @@ export async function loadConfig() {
 }
 
 /**
- * Load project-local pagesdown.config.json from current working directory.
+ * Load project-local notiondrive.config.json from current working directory.
  * Returns the parsed object or null if the file does not exist.
  */
 export async function loadProjectConfig() {
-  const projectFile = path.resolve(process.cwd(), 'pagesdown.config.json');
+  const projectFile = path.resolve(process.cwd(), 'notiondrive.config.json');
   try {
     const data = await readFile(projectFile, 'utf-8');
     const parsed = JSON.parse(data);
@@ -94,7 +95,7 @@ export function flattenManifest(data) {
 }
 
 /**
- * Save config to ~/.pagesdown/config.json.
+ * Save config to ~/.notiondrive/config.json.
  * Directory and file are created with restrictive permissions from the start.
  */
 export async function saveConfig(config) {

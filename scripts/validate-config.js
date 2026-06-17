@@ -5,7 +5,7 @@ import os from 'node:os';
 
 async function main() {
   const schemaPath = path.resolve(process.cwd(), 'schemas/config.schema.json');
-  const configPath = process.argv[2] || path.join(os.homedir(), '.pagesdown', 'config.json');
+  const configPath = process.argv[2] || path.join(os.homedir(), '.notiondrive', 'config.json');
 
   try {
     const [schemaRaw, configRaw] = await Promise.all([

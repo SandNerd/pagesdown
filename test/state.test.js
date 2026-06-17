@@ -7,12 +7,12 @@ import crypto from 'node:crypto';
 import { loadStateLedger, saveStateLedger, calculateFileHash } from '../src/state.js';
 
 test('state ledger save/load and file hash', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'pagesdown-state-test-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-state-test-'));
   const originalCwd = process.cwd();
   try {
     process.chdir(dir);
     const fname = 'sample.md';
-    const content = 'Hello Pagesdown';
+    const content = 'Hello Notion Drive';
     await writeFile(fname, content, 'utf8');
 
     const expectedHash = crypto.createHash('sha256').update(Buffer.from(content)).digest('hex');

@@ -31,7 +31,7 @@ test('slugifyFilename normalizes text', () => {
 });
 
 test('ensureDir creates directories recursively', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'pagesdown-utils-'));
+  const base = await mkdtemp(path.join(tmpdir(), 'notiondrive-utils-'));
   try {
     const nested = path.join(base, 'a', 'b', 'c');
     await ensureDir(nested);
@@ -42,13 +42,13 @@ test('ensureDir creates directories recursively', async () => {
 });
 
 test('isWritablePath returns false for missing parent', async () => {
-  const target = path.join(tmpdir(), 'pagesdown-nope-parent', 'child');
+  const target = path.join(tmpdir(), 'notiondrive-nope-parent', 'child');
   const writable = await isWritablePath(target);
   assert.equal(writable, false);
 });
 
 test('isWritablePath checks existing directory permissions', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'pagesdown-write-'));
+  const base = await mkdtemp(path.join(tmpdir(), 'notiondrive-write-'));
   try {
     const before = await isWritablePath(base);
     assert.equal(before, true);

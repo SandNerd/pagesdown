@@ -1,4 +1,4 @@
-# Copilot Agent Instructions — pagesdown
+# Copilot Agent Instructions — notiondrive
 
 Purpose
 -------

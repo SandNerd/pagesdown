@@ -3,12 +3,12 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { safeMerge } from './utils.js';
-const GLOBAL_STATE_DIR = path.join(os.homedir(), '.pagesdown');
+const GLOBAL_STATE_DIR = path.join(os.homedir(), '.notiondrive');
 const GLOBAL_STATE_FILE = path.join(GLOBAL_STATE_DIR, 'state.json');
 
 function resolveStateFilePaths() {
-  if (process.env.PAGESDOWN_STATE_FILE && typeof process.env.PAGESDOWN_STATE_FILE === 'string') {
-    return { explicit: path.resolve(process.env.PAGESDOWN_STATE_FILE) };
+  if (process.env.NOTIONDRIVE_STATE_FILE && typeof process.env.NOTIONDRIVE_STATE_FILE === 'string') {
+    return { explicit: path.resolve(process.env.NOTIONDRIVE_STATE_FILE) };
   }
   const global = GLOBAL_STATE_FILE;
   return { global };
@@ -97,7 +97,7 @@ export async function saveStateLedger(state) {
     return;
   }
 
-  // Default: ensure global directory and write to ~/.pagesdown/state.json
+  // Default: ensure global directory and write to ~/.notiondrive/state.json
   try {
     await mkdir(path.dirname(paths.global), { recursive: true, mode: 0o700 });
   } catch (err) {}

@@ -32,7 +32,7 @@ function makeMockFetch(contentBytes = [1, 2, 3], contentLength = 3) {
 }
 
 test('processAssets skips blocked hostnames and private IPs', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'pagesdown-ssrf-'));
+  const base = await mkdtemp(path.join(tmpdir(), 'notiondrive-ssrf-'));
   try {
     const md = 'Hello ![a](http://127.0.0.1/secret.png) ![b](http://10.0.0.5/p.png) ![c](http://localhost/x.png)';
     // Should not attempt fetches for these private/blocked hosts and should return unchanged markdown
@@ -54,7 +54,7 @@ test('processAssets skips blocked hostnames and private IPs', async () => {
 });
 
 test('downloadFile succeeds without Content-Length header', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'pagesdown-asset-'));
+  const base = await mkdtemp(path.join(tmpdir(), 'notiondrive-asset-'));
   const dest = path.join(base, 'f.bin');
   const orig = global.fetch;
   try {
@@ -70,7 +70,7 @@ test('downloadFile succeeds without Content-Length header', async () => {
 });
 
 test('downloadFile rejects when Content-Length header too large', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'pagesdown-asset-'));
+  const base = await mkdtemp(path.join(tmpdir(), 'notiondrive-asset-'));
   const dest = path.join(base, 'big.bin');
   const orig = global.fetch;
   try {

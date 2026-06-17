@@ -52,7 +52,7 @@ export function extractTitle(page) {
       if (prop && prop.type === 'title') {
         const text = findTitleArray(prop.title) || findTitleArray(prop);
         if (text) {
-          try { if (process.env.PAGESDOWN_DEBUG) p.log.info(`[pagesdown] extractTitle: using property '${key}' as title`); } catch {}
+          try { if (process.env.NOTIONDRIVE_DEBUG) p.log.info(`[notiondrive] extractTitle: using property '${key}' as title`); } catch {}
           return text;
         }
       }
@@ -61,7 +61,7 @@ export function extractTitle(page) {
 
   const fallbackTitle = findTitleArray(page);
   if (fallbackTitle) {
-    try { if (process.env.PAGESDOWN_DEBUG) p.log.info('[pagesdown] extractTitle: using fallback scan to locate title'); } catch {}
+    try { if (process.env.NOTIONDRIVE_DEBUG) p.log.info('[notiondrive] extractTitle: using fallback scan to locate title'); } catch {}
     return fallbackTitle;
   }
 
@@ -73,7 +73,7 @@ export function extractTitle(page) {
       const slug = lastSegment.replace(/-[a-f0-9]{32}$/i, '');
       const decoded = decodeURIComponent(slug).replace(/[-_]+/g, ' ').trim();
       if (decoded) {
-        try { if (process.env.PAGESDOWN_DEBUG) p.log.info('[pagesdown] extractTitle: derived title from URL slug'); } catch {}
+        try { if (process.env.NOTIONDRIVE_DEBUG) p.log.info('[notiondrive] extractTitle: derived title from URL slug'); } catch {}
         return decoded;
       }
     } catch {}

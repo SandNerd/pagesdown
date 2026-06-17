@@ -19,7 +19,7 @@ function createNoopPrompts() {
 }
 
 test('two-way sync pushes to Notion and returns completedTargets', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-two-way-test-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-two-way-test-'));
 
   const notion = {
     validateToken: async () => {},
@@ -81,7 +81,7 @@ test('two-way sync pushes to Notion and returns completedTargets', async () => {
 });
 
 test('two-way sync does not push when remote changed', async () => {
-  const outDir = await mkdtemp(path.join(tmpdir(), 'pagesdown-two-way-test-'));
+  const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-two-way-test-'));
 
   const notion = {
     validateToken: async () => {},

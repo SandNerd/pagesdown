@@ -33,8 +33,8 @@ function normalizeTarget(t) {
 async function getManifestEntriesForPath(absoluteLocalPath) {
   const results = [];
   const candidates = [
-    { name: 'project', path: path.resolve(process.cwd(), 'pagesdown.config.json') },
-    { name: 'user', path: path.join(os.homedir(), '.pagesdown', 'config.json') },
+    { name: 'project', path: path.resolve(process.cwd(), 'notiondrive.config.json') },
+    { name: 'user', path: path.join(os.homedir(), '.notiondrive', 'config.json') },
   ];
 
   for (const c of candidates) {
@@ -153,7 +153,7 @@ async function pushLocalFileToNotion({ notion, pageId, targetItem, target, local
       const newBody = bodyLines.filter((_, idx) => idx !== h1Index).join('\n');
       uploadContent = (fmMatch ? fmMatch[0] : '') + newBody;
     } catch (err) {
-      if (process.env.PAGESDOWN_DEBUG) console.error(`[DEBUG] Failed to sync H1 title: ${err.message}`);
+      if (process.env.NOTIONDRIVE_DEBUG) console.error(`[DEBUG] Failed to sync H1 title: ${err.message}`);
     }
   }
 
@@ -308,7 +308,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
         let detailMsg = `\n - existing mapping: ${priorFilename}\n - current mapping: ${targetFilename}`;
         try {
           // attempt to enumerate manifests that map this pageId to filenames
-          const candidates = [path.resolve(process.cwd(), 'pagesdown.config.json'), path.join(os.homedir(), '.pagesdown', 'config.json')];
+          const candidates = [path.resolve(process.cwd(), 'notiondrive.config.json'), path.join(os.homedir(), '.notiondrive', 'config.json')];
           const found = [];
           for (const cpath of candidates) {
             try {
@@ -362,7 +362,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
 
   // Validate token
   if (!token) {
-    prompts.log.error('No Notion token found. Set NOTION_TOKEN or save a token with the CLI (pagesdown --token <token>).');
+    prompts.log.error('No Notion token found. Set NOTION_TOKEN or save a token with the CLI (notiondrive --token <token>).');
     return { completedTargets: [], failedTargets: [{ target: null, error: 'No Notion token' }] };
   }
 
@@ -493,7 +493,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
     targets = targets.filter((t) => !(t && t.disabled === true));
   }
   if (targets.length === 0) {
-    prompts.log.warn('No targets found in pagesdown.config.json');
+    prompts.log.warn('No targets found in notiondrive.config.json');
     return { completedTargets: [], failedTargets: [] };
   }
 
@@ -953,7 +953,7 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
         const priorFilename = seenNotionIds.get(pageId);
         let detailMsg = `\n - existing mapping: ${priorFilename}\n - current mapping: ${targetFilename}`;
         try {
-          const candidates = [path.resolve(process.cwd(), 'pagesdown.config.json'), path.join(os.homedir(), '.pagesdown', 'config.json')];
+          const candidates = [path.resolve(process.cwd(), 'notiondrive.config.json'), path.join(os.homedir(), '.notiondrive', 'config.json')];
           const found = [];
           for (const cpath of candidates) {
             try {
@@ -1004,7 +1004,7 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
     return { results: [] };
   }
   if (!token) {
-    prompts.log.error('No Notion token found. Provide NOTION_TOKEN or save a token in ~/.pagesdown/config.json.');
+    prompts.log.error('No Notion token found. Provide NOTION_TOKEN or save a token in ~/.notiondrive/config.json.');
     return { results: [] };
   }
 
@@ -1304,7 +1304,7 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
   }, {});
 
   // Output
-  console.log('\npagesdown sync status\n');
+  console.log('\nNotion Drive sync status\n');
   if (args?.jsonOutput) {
     console.log(JSON.stringify({ results: displayed, counts: displayCounts }, null, 2));
     return { results: displayed, counts: displayCounts };

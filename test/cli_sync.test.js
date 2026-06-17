@@ -17,7 +17,7 @@ test('parseArgs combines sync with other flags', () => {
 });
 
 test('loadLocalManifest returns null when file missing', () => {
-  const tmpDir = mkdtempSync(path.join('/tmp', 'pagesdown-test-'));
+  const tmpDir = mkdtempSync(path.join('/tmp', 'notiondrive-test-'));
   const originalCwd = process.cwd();
   try {
     process.chdir(tmpDir);
@@ -30,7 +30,7 @@ test('loadLocalManifest returns null when file missing', () => {
 });
 
 test('loadLocalManifest parses valid manifest', () => {
-  const tmpDir = mkdtempSync(path.join('/tmp', 'pagesdown-test-'));
+  const tmpDir = mkdtempSync(path.join('/tmp', 'notiondrive-test-'));
   const originalCwd = process.cwd();
   try {
     process.chdir(tmpDir);
@@ -40,7 +40,7 @@ test('loadLocalManifest parses valid manifest', () => {
         { source: 'db-id-123', path: './out2', format: 'flattened' },
       ],
     };
-    writeFileSync('pagesdown.config.json', JSON.stringify(manifest), 'utf-8');
+    writeFileSync('notiondrive.config.json', JSON.stringify(manifest), 'utf-8');
 
     const loaded = loadLocalManifest();
     assert.deepEqual(loaded.targets.length, 2);
@@ -55,11 +55,11 @@ test('loadLocalManifest parses valid manifest', () => {
 });
 
 test('loadLocalManifest throws on invalid JSON', () => {
-  const tmpDir = mkdtempSync(path.join('/tmp', 'pagesdown-test-'));
+  const tmpDir = mkdtempSync(path.join('/tmp', 'notiondrive-test-'));
   const originalCwd = process.cwd();
   try {
     process.chdir(tmpDir);
-    writeFileSync('pagesdown.config.json', 'invalid json{', 'utf-8');
+    writeFileSync('notiondrive.config.json', 'invalid json{', 'utf-8');
 
     assert.throws(() => {
       loadLocalManifest();
@@ -71,11 +71,11 @@ test('loadLocalManifest throws on invalid JSON', () => {
 });
 
 test('loadLocalManifest throws when targets array missing', () => {
-  const tmpDir = mkdtempSync(path.join('/tmp', 'pagesdown-test-'));
+  const tmpDir = mkdtempSync(path.join('/tmp', 'notiondrive-test-'));
   const originalCwd = process.cwd();
   try {
     process.chdir(tmpDir);
-    writeFileSync('pagesdown.config.json', JSON.stringify({ foo: 'bar' }), 'utf-8');
+    writeFileSync('notiondrive.config.json', JSON.stringify({ foo: 'bar' }), 'utf-8');
 
     assert.throws(() => {
       loadLocalManifest();
@@ -87,7 +87,7 @@ test('loadLocalManifest throws when targets array missing', () => {
 });
 
 test('loadLocalManifest flattens grouped targets into unified targets array', () => {
-  const tmpDir = mkdtempSync(path.join('/tmp', 'pagesdown-test-'));
+  const tmpDir = mkdtempSync(path.join('/tmp', 'notiondrive-test-'));
   const originalCwd = process.cwd();
   try {
     process.chdir(tmpDir);
@@ -103,7 +103,7 @@ test('loadLocalManifest flattens grouped targets into unified targets array', ()
         }
       ]
     };
-    writeFileSync('pagesdown.config.json', JSON.stringify(manifest), 'utf-8');
+    writeFileSync('notiondrive.config.json', JSON.stringify(manifest), 'utf-8');
 
     const loaded = loadLocalManifest();
     assert.equal(Array.isArray(loaded.targets), true);

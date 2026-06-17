@@ -49,8 +49,8 @@ function flattenManifest(data) {
   return data;
 }
 
-const projectFile = path.resolve(process.cwd(), 'pagesdown.config.json');
-const userFile = path.join(os.homedir(), '.pagesdown', 'config.json');
+const projectFile = path.resolve(process.cwd(), 'notiondrive.config.json');
+const userFile = path.join(os.homedir(), '.notiondrive', 'config.json');
 
 const manifests = [];
 if (fs.existsSync(projectFile)) {

@@ -224,7 +224,7 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (a === 'sync') {
       out.syncMode = true;
-      // Capture an immediate trailing positional filter (e.g. `pagesdown sync sys-design`)
+      // Capture an immediate trailing positional filter (e.g. `notiondrive sync sys-design`)
       const next = argv[i + 1];
       if (next && typeof next === 'string' && !next.startsWith('-')) {
         out.syncFilter = next;
@@ -236,7 +236,7 @@ export function parseArgs(argv) {
       i += 1;
     } else if (a === 'status') {
       out.statusMode = true;
-      // capture an immediate trailing positional filter (e.g. `pagesdown status sys-design`)
+      // capture an immediate trailing positional filter (e.g. `notiondrive status sys-design`)
       const next = argv[i + 1];
       if (next && typeof next === 'string' && !next.startsWith('-')) {
         out.statusFilter = next;
@@ -325,12 +325,12 @@ export function getHeadlessExitCode(stats) {
 }
 
 /**
- * Load pagesdown.config.json from current working directory.
+ * Load notiondrive.config.json from current working directory.
  * Expects an object with targets array: [{ source, path?, format?, sync? }]
  * The `path` field may be a directory (generated filename) or a full file path.
  */
 export function loadLocalManifest() {
-  const manifestPath = path.join(process.cwd(), 'pagesdown.config.json');
+  const manifestPath = path.join(process.cwd(), 'notiondrive.config.json');
   if (!existsSync(manifestPath)) {
     return null;
   }
@@ -355,20 +355,20 @@ export async function main(envToken = null) {
   } catch (err) {}
   if (args.help) {
     console.log([
-      'Usage: pagesdown [command] [options]',
+      'Usage: notiondrive [command] [options]',
       '',
       'Commands:',
-      '  sync                  Run batch download from pagesdown.config.json or ~/.pagesdown/config.json',
+      '  sync                  Run batch download from notiondrive.config.json or ~/.notiondrive/config.json',
       '  status                Show sync status for manifest targets (supports name or group filtering)',
-      '                        Project-local pagesdown.config.json takes precedence and can also provide token/defaultOutputDir',
+      '                        Project-local notiondrive.config.json takes precedence and can also provide token/defaultOutputDir',
       '                        You can limit which targets are processed by passing a positional filter',
       '                        after `sync` or by using the `--group` / `-g` flag.',
       '                        Use `--watch` or `-w` to continuously monitor tracked files for changes and',
       '                        automatically push them to Notion in real-time.',
       '                        Examples:',
-      '                          pagesdown sync sys-design       # run targets named or grouped sys-design',
-      '                          pagesdown sync -g docs          # run targets with group: "docs"',
-      '                          pagesdown sync --watch          # start watching for file changes',
+      '                          notiondrive sync sys-design       # run targets named or grouped sys-design',
+      '                          notiondrive sync -g docs          # run targets with group: "docs"',
+      '                          notiondrive sync --watch          # start watching for file changes',
       '',
       'Options:',
       '  -s, --source <id-or-url>  Specify an explicit Notion Page/Database UUID or full Share Link',
@@ -378,7 +378,7 @@ export async function main(envToken = null) {
       '  -d, --debug           Enable verbose debug logging (helpful for troubleshooting)',
       '      --set-default-out <path>  Set and save the global default output directory and exit',
       '  -t, --token <token>     Set and save a Notion integration token',
-      '      --no-cache          Do not read or write the local .pagesdown-state.json ledger (force fresh downloads)',
+      '      --no-cache          Do not read or write the local .notiondrive-state.json ledger (force fresh downloads)',
       '      --type <markdown|csv>  Output format for database exports (default: markdown)',
       '      --format <markdown-tree|flattened|csv>  Output format for targets and immediate downloads',
       '      --sync <pull-only|push-only|two-way>  Force sync mode for this run (when using --source) or for created targets',
@@ -396,8 +396,8 @@ export async function main(envToken = null) {
   
   // Enable debug mode early so other modules can check env var
   if (args.debug) {
-    process.env.PAGESDOWN_DEBUG = '1';
-    p.log.info('Debug logging enabled (PAGESDOWN_DEBUG=1)');
+    process.env.NOTIONDRIVE_DEBUG = '1';
+    p.log.info('Debug logging enabled (NOTIONDRIVE_DEBUG=1)');
   }
   // If the user asked to read the source id/url from stdin (pipe/echo), do that now.
   if (args.source === '-') {
@@ -415,7 +415,7 @@ export async function main(envToken = null) {
   // If requested, read the source id/url from the system clipboard (macOS)
   // Handled later as part of headless (--source) flow to centralize clipboard access.
   console.log(BANNER);
-  p.intro('pagesdown v0.1.2');
+  p.intro('notiondrive v0.1.2');
 
   // ── Prepare config/token ──────────────────────────────────────────
   const projectConfig = await loadProjectConfig();
@@ -436,7 +436,7 @@ export async function main(envToken = null) {
     try {
       const newConfig = safeMerge({}, savedConfig || {}, { defaultOutputDir: resolved });
       await saveConfig(newConfig);
-      p.log.success(`Saved default output directory to ~/.pagesdown/config.json: ${resolved}`);
+      p.log.success(`Saved default output directory to ~/.notiondrive/config.json: ${resolved}`);
       process.exit(0);
     } catch (err) {
       p.log.error(`Failed to save config: ${err.message}`);
@@ -458,7 +458,7 @@ export async function main(envToken = null) {
       // Save immediately
       await saveConfig({ token, workspace: savedConfig?.workspace });
       tokenSavedViaFlag = true;
-      p.log.success('Token saved to ~/.pagesdown/config.json');
+      p.log.success('Token saved to ~/.notiondrive/config.json');
     } catch (err) {
       spinValidate.stop('Validation failed.');
       p.log.error('Provided token is invalid. Aborting.');
@@ -470,7 +470,7 @@ export async function main(envToken = null) {
   if (!token && projectConfig?.token) {
     token = projectConfig.token;
     workspaceName = projectConfig.workspace;
-    p.log.info('Using token from ./pagesdown.config.json');
+    p.log.info('Using token from ./notiondrive.config.json');
   }
 
   // Status subcommand: local-only summary of manifest vs ledger/remote
@@ -478,7 +478,7 @@ export async function main(envToken = null) {
     try {
       const manifest = resolveSyncManifest(projectConfig, savedConfig);
       if (!manifest) {
-        p.log.error('No sync targets found. Add a "targets" array to ./pagesdown.config.json or ~/.pagesdown/config.json.');
+        p.log.error('No sync targets found. Add a "targets" array to ./notiondrive.config.json or ~/.notiondrive/config.json.');
         process.exit(1);
       }
       token = token || envToken || null;
@@ -494,7 +494,7 @@ export async function main(envToken = null) {
   if (!token && savedConfig?.token) {
     token = savedConfig.token;
     workspaceName = savedConfig.workspace;
-    p.log.info('Using saved token from ~/.pagesdown/config.json');
+    p.log.info('Using saved token from ~/.notiondrive/config.json');
   }
 
   // If an env var token exists and no other token yet, prefer it but log.
@@ -509,7 +509,7 @@ export async function main(envToken = null) {
     try {
       const manifest = resolveSyncManifest(projectConfig, savedConfig);
       if (!manifest) {
-        p.log.error('No sync targets found. Add a "targets" array to ./pagesdown.config.json or ~/.pagesdown/config.json.');
+        p.log.error('No sync targets found. Add a "targets" array to ./notiondrive.config.json or ~/.notiondrive/config.json.');
         p.log.info('Create one with this structure:');
         p.log.info(JSON.stringify({
           targets: [
@@ -800,7 +800,7 @@ export async function main(envToken = null) {
   if (!savedConfig?.token && !tokenSavedViaFlag && token) {
     try {
       await saveConfig({ token, workspace: workspaceName });
-      p.log.success('Token saved to ~/.pagesdown/config.json');
+      p.log.success('Token saved to ~/.notiondrive/config.json');
     } catch {
       p.log.warn('Failed to save token to config file.');
     }

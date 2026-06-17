@@ -1,11 +1,11 @@
 {
   "json.schemas": [
     {
-      "fileMatch": ["pagesdown.config.json", "pagesdown.config.example.json"],
+      "fileMatch": ["notiondrive.config.json", "notiondrive.config.example.json"],
       "url": "./schemas/config.schema.ui.json"
     },
     {
-      "fileMatch": ["/Users/sam/.pagesdown/config.json"],
+      "fileMatch": ["/Users/sam/.notiondrive/config.json"],
       "url": "./schemas/config.schema.ui.json"
     }
   ]

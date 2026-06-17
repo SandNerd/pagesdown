@@ -41,7 +41,7 @@ test('getAssetFilename derives names and adds extension', () => {
 });
 
 test('downloadFile saves content from fetch', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'pagesdown-asset-'));
+  const base = await mkdtemp(path.join(tmpdir(), 'notiondrive-asset-'));
   try {
     const dest = path.join(base, 'f.bin');
     const orig = global.fetch;
@@ -60,7 +60,7 @@ test('downloadFile saves content from fetch', async () => {
 });
 
 test('processAssets downloads and rewrites image URLs', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'pagesdown-asset-'));
+  const base = await mkdtemp(path.join(tmpdir(), 'notiondrive-asset-'));
   try {
     const md = 'Hello ![alt](https://example.com/img.png) world';
     const orig = global.fetch;
