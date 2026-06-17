@@ -181,7 +181,7 @@ When you run headless, the save path is resolved in this order:
 2. saved default output directory from `~/.notiondrive/config.json`
 3. the current working directory
 
-If you choose a custom folder interactively, notiondrive can also offer to save it as the new default for future headless exports.
+If you choose a custom folder interactively, Notion Drive can also offer to save it as the new default for future headless exports.
 
 ### Batch Sync Mode
 
@@ -321,7 +321,7 @@ Notion Drive supports three per-target output formats: `markdown-tree` (default)
 ```
 
 - `csv`
-  - What it does: when a target points at a Notion database, notiondrive writes a single RFC4180-compliant CSV file with one row per database row. Column order follows the database properties (Title first when present). The CSV is written to the configured `path` (if `path` is a file) or into the `path` directory as `<slugified-database-name>.csv` when `path` is a directory.
+  - What it does: when a target points at a Notion database, Notion Drive writes a single RFC4180-compliant CSV file with one row per database row. Column order follows the database properties (Title first when present). The CSV is written to the configured `path` (if `path` is a file) or into the `path` directory as `<slugified-database-name>.csv` when `path` is a directory.
   - When to use: exporting Notion databases for spreadsheets or downstream data processing.
   - Notes:
     - Multi-select values are joined with `,`.
@@ -339,37 +339,37 @@ Notion Drive supports three per-target output formats: `markdown-tree` (default)
 
 Tips:
 
-- If `path` points to a file whose basename contains a code extension (for example `script.js` or `deploy.sh`), notiondrive treats the target as a code artifact and extracts Notion `code` blocks into a plain file (no Markdown).
+- If `path` points to a file whose basename contains a code extension (for example `script.js` or `deploy.sh`), Notion Drive treats the target as a code artifact and extracts Notion `code` blocks into a plain file (no Markdown).
 - Use `--format` to select the output form: `--format flattened` for single-file flattening, and `--format csv` for database exports.
 
 #### Two-Way Sync
 
-When `sync` is set to `"two-way"`, notiondrive will:
+When `sync` is set to `"two-way"`, Notion Drive will:
 
-1. Check the local file hash against the notiondrive ledger (project-local `.notiondrive-state.json` or global `~/.notiondrive/state.json`).
+1. Check the local file hash against the Notion Drive ledger (project-local `.notiondrive-state.json` or global `~/.notiondrive/state.json`).
 2. If the local file has changed but the Notion page hasn't (same `last_edited_time`), push the local edits to Notion.
 3. Clear the page content and replace it with the Markdown-generated blocks.
 4. Update the ledger with the new file hash and remote mtime.
 
 Script & code-file syncs
 
-If you configure a target with a `filename` that includes a code extension (for example `script.js`, `deploy.sh`, or `schema.sql`), notiondrive treats that target as a code artifact rather than a Markdown document when downloading.
+If you configure a target with a `filename` that includes a code extension (for example `script.js`, `deploy.sh`, or `schema.sql`), Notion Drive treats that target as a code artifact rather than a Markdown document when downloading.
 
-- On download, notiondrive will extract raw `code` blocks from the Notion page and concatenate them into a plain code file (no Markdown fences or headers). This produces a clean, ready-to-run source file for local development or LLM agents.
--- On upload (two-way, push-only), notiondrive performs a safety check and will abort any push if the local file contains flattened Markdown tables or sub-page markers — these indicate that pushing could destroy live Notion database structure. To force a push despite detected table/subpage signatures, run the command with `--force` (or `-f`). In non-forced runs the CLI will warn with a `[SAFETY BYPASS]` message and skip the push for that target.
+- On download, Notion Drive will extract raw `code` blocks from the Notion page and concatenate them into a plain code file (no Markdown fences or headers). This produces a clean, ready-to-run source file for local development or LLM agents.
+-- On upload (two-way, push-only), Notion Drive performs a safety check and will abort any push if the local file contains flattened Markdown tables or sub-page markers — these indicate that pushing could destroy live Notion database structure. To force a push despite detected table/subpage signatures, run the command with `--force` (or `-f`). In non-forced runs the CLI will warn with a `[SAFETY BYPASS]` message and skip the push for that target.
 
-This creates a safe developer workflow: keep scripts as code files in Notion using `code` blocks, and use notiondrive to synchronize them without accidental structural damage to your Notion databases.
+This creates a safe developer workflow: keep scripts as code files in Notion using `code` blocks, and use Notion Drive to synchronize them without accidental structural damage to your Notion databases.
 
 This enables safe round-trip editing: make changes to the local Markdown file, and they'll be synced back to Notion when you run `notiondrive sync`.
 
-When `sync` is set to `"push-only"`, notiondrive will:
+When `sync` is set to `"push-only"`, Notion Drive will:
 
 1. Skip remote timestamp checks for that target.
 2. Compare the local file hash to the ledger's `last_synced_local_hash`.
 3. Push local changes with a clear-and-append overwrite when the hash changes.
 4. Log `[Up to date] filename (skipped)` when nothing changed locally.
 
-When `conflict` is set, notiondrive will:
+When `conflict` is set, Notion Drive will:
 
 1. Treat `local-wins` as an overwrite to Notion when both sides changed.
 2. Treat `notion-wins` as the safe default that keeps the cloud version and downloads it instead.
@@ -437,9 +437,9 @@ You can limit which targets are processed by passing a positional filter after t
 
 - Positional filter: `notiondrive sync sys-design` — runs only targets whose `name` or `group` matches `sys-design`.
 - Group flag: `notiondrive sync --group docs` or `notiondrive sync -g docs` — runs only targets with `group: "docs"`.
-- Directory path: `notiondrive sync ./docs` — when you pass a local directory path, notiondrive will match all targets whose configured `outDir` resolves to that absolute directory (tilde-expansion and realpath normalization are applied). This also accepts absolute paths, e.g. `notiondrive sync /home/me/projects/site/docs`.
+- Directory path: `notiondrive sync ./docs` — when you pass a local directory path, Notion Drive will match all targets whose configured `outDir` resolves to that absolute directory (tilde-expansion and realpath normalization are applied). This also accepts absolute paths, e.g. `notiondrive sync /home/me/projects/site/docs`.
 
-Note: To use name-based filtering, ensure your targets include a `name` field in `notiondrive.config.json`. If some targets lack `name`, notiondrive will warn with a tip asking you to add descriptive names to the manifest.
+Note: To use name-based filtering, ensure your targets include a `name` field in `notiondrive.config.json`. If some targets lack `name`, Notion Drive will warn with a tip asking you to add descriptive names to the manifest.
 
 #### Watch Mode
 
@@ -455,15 +455,15 @@ When watch mode is active:
 
 1. **Baseline sync runs first** to ensure local and remote are aligned.
 2. **File watchers** are set up on all tracked directories for your sync targets.
-3. **On local file change**, notiondrive detects the modification, calculates the new SHA-256 hash, and compares it to the ledger.
-4. **If the hash differs**, notiondrive immediately:
+3. **On local file change**, Notion Drive detects the modification, calculates the new SHA-256 hash, and compares it to the ledger.
+4. **If the hash differs**, Notion Drive immediately:
    - Validates the file doesn't contain flattened Markdown tables or sub-page markers (safety check).
    - Pushes the changed file to Notion by clearing the page content and appending new blocks.
    - Updates the ledger with the new hash and remote mtime.
    - Logs a timestamped confirmation: `[Watcher] HH:MM:SS - Pushed upstream successfully.`
 5. **Ctrl+C** closes all file watchers cleanly, flushes the ledger to disk, and exits.
 
-Watch mode works with both `push-only` and `two-way` sync modes. Use the `--force` (`-f`) flag to bypass the structural safety preflight when pushing. It requires that your targets have been downloaded and tracked in the notiondrive ledger (project-local `.notiondrive-state.json` or global `~/.notiondrive/state.json`) before entering watch mode (run `notiondrive sync` once first if you're starting fresh).
+Watch mode works with both `push-only` and `two-way` sync modes. Use the `--force` (`-f`) flag to bypass the structural safety preflight when pushing. It requires that your targets have been downloaded and tracked in the Notion Drive ledger (project-local `.notiondrive-state.json` or global `~/.notiondrive/state.json`) before entering watch mode (run `notiondrive sync` once first if you're starting fresh).
 
 Example workflow:
 
@@ -475,7 +475,7 @@ notiondrive sync
 notiondrive sync --watch
 
 # Edit a local file in another editor
-# notiondrive detects the change within ~500ms and pushes it
+# Notion Drive detects the change within ~500ms and pushes it
 
 # Press Ctrl+C to stop watching and exit
 ```
