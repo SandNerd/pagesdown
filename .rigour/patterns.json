@@ -1,0 +1,942 @@
+{
+  "version": "1.0.0",
+  "lastUpdated": "2026-05-28T17:34:09.639Z",
+  "rootDir": "/Users/sam/Documents/GitHub/notiondrive",
+  "patterns": [
+    {
+      "id": "51364a7b58463bdd",
+      "type": "function",
+      "name": "exitIfCancelled",
+      "file": "src/cli.js",
+      "line": 11,
+      "endLine": 17,
+      "signature": "(value)",
+      "description": "Exit cleanly if the user cancels a prompt.",
+      "keywords": [
+        "exit",
+        "if",
+        "cancelled"
+      ],
+      "hash": "f810dd7288b67b09",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.617Z"
+    },
+    {
+      "id": "9605b6f23996974f",
+      "type": "function",
+      "name": "extractNotionId",
+      "file": "src/cli.js",
+      "line": 23,
+      "endLine": 30,
+      "signature": "(input)",
+      "description": "Extract a Notion ID from a raw input (URL or UUID). Returns a 32-char hex string\nwhen possible, otherwise returns the original input.",
+      "keywords": [
+        "extract",
+        "notion",
+        "id"
+      ],
+      "hash": "1de5cc977d4f5111",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.617Z"
+    },
+    {
+      "id": "15c6af073c556274",
+      "type": "function",
+      "name": "parseArgs",
+      "file": "src/cli.js",
+      "line": 47,
+      "endLine": 76,
+      "signature": "(argv)",
+      "description": "",
+      "keywords": [
+        "parse",
+        "args"
+      ],
+      "hash": "64dbda42303b1d96",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.617Z"
+    },
+    {
+      "id": "9693104558ef40c4",
+      "type": "function",
+      "name": "main",
+      "file": "src/cli.js",
+      "line": 78,
+      "endLine": 555,
+      "signature": "()",
+      "description": "",
+      "keywords": [
+        "main"
+      ],
+      "hash": "f16977f63cc2f36d",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.617Z"
+    },
+    {
+      "id": "8dfb6f42e4e45970",
+      "type": "function",
+      "name": "loadConfig",
+      "file": "src/config.js",
+      "line": 11,
+      "endLine": 23,
+      "signature": "()",
+      "description": "Load saved config. Returns { token, workspace } or null if none/invalid.",
+      "keywords": [
+        "load",
+        "config"
+      ],
+      "hash": "0b8820002b59be15",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.620Z"
+    },
+    {
+      "id": "d01ae9c3d8d6decc",
+      "type": "function",
+      "name": "saveConfig",
+      "file": "src/config.js",
+      "line": 29,
+      "endLine": 35,
+      "signature": "(config)",
+      "description": "Save config to ~/.notiondrive/config.json.\nDirectory and file are created with restrictive permissions from the start.",
+      "keywords": [
+        "save",
+        "config"
+      ],
+      "hash": "ee950832d8078e92",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.620Z"
+    },
+    {
+      "id": "1a036e9a2eb6befc",
+      "type": "constant",
+      "name": "MAX_DEPTH",
+      "file": "src/download.js",
+      "line": 7,
+      "endLine": 7,
+      "signature": "",
+      "description": "",
+      "keywords": [
+        "max",
+        "depth"
+      ],
+      "hash": "ed1807f12e0c6f59",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.628Z"
+    },
+    {
+      "id": "a30b9dc4d1f3fe8d",
+      "type": "constant",
+      "name": "DOWNLOAD_TIMEOUT_MS",
+      "file": "src/download.js",
+      "line": 8,
+      "endLine": 8,
+      "signature": "",
+      "description": "",
+      "keywords": [
+        "download",
+        "timeout",
+        "ms"
+      ],
+      "hash": "ee92bb03305decd7",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.628Z"
+    },
+    {
+      "id": "1a2777179a047f20",
+      "type": "constant",
+      "name": "ASSET_CONCURRENCY",
+      "file": "src/download.js",
+      "line": 9,
+      "endLine": 9,
+      "signature": "",
+      "description": "",
+      "keywords": [
+        "asset",
+        "concurrency"
+      ],
+      "hash": "ad5e578d3c061870",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.628Z"
+    },
+    {
+      "id": "99b79881639582be",
+      "type": "function",
+      "name": "splitBlocksAtBoundaries",
+      "file": "src/download.js",
+      "line": 22,
+      "endLine": 56,
+      "signature": "(blocks)",
+      "description": "Split blocks at child_page/child_database boundaries.\nReturns { markdownParts, childEntries } for conversion and recursion.",
+      "keywords": [
+        "split",
+        "blocks",
+        "at",
+        "boundaries"
+      ],
+      "hash": "c25b257c390c2ee8",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.628Z"
+    },
+    {
+      "id": "60e5d58be34d66d8",
+      "type": "function",
+      "name": "hasExternalImages",
+      "file": "src/download.js",
+      "line": 61,
+      "endLine": 63,
+      "signature": "(markdown)",
+      "description": "Check whether markdown content contains external image URLs.",
+      "keywords": [
+        "has",
+        "external",
+        "images"
+      ],
+      "hash": "781ac2fcfff04cb1",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.629Z"
+    },
+    {
+      "id": "1576a0f3d163d1de",
+      "type": "function",
+      "name": "normalizeSpacing",
+      "file": "src/download.js",
+      "line": 65,
+      "endLine": 69,
+      "signature": "(md)",
+      "description": "",
+      "keywords": [
+        "normalize",
+        "spacing"
+      ],
+      "hash": "bfbdd047bfe87cf3",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.629Z"
+    },
+    {
+      "id": "2443f736e1271e67",
+      "type": "function",
+      "name": "escapeTableCell",
+      "file": "src/download.js",
+      "line": 71,
+      "endLine": 74,
+      "signature": "(text)",
+      "description": "",
+      "keywords": [
+        "escape",
+        "table",
+        "cell"
+      ],
+      "hash": "5fee52381c2b6c8b",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.629Z"
+    },
+    {
+      "id": "d09dcdfa08b549f7",
+      "type": "function",
+      "name": "notionRichTextToPlain",
+      "file": "src/download.js",
+      "line": 76,
+      "endLine": 79,
+      "signature": "(richText)",
+      "description": "",
+      "keywords": [
+        "notion",
+        "rich",
+        "text",
+        "to",
+        "plain"
+      ],
+      "hash": "d7e3e2d00b99b4f6",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.629Z"
+    },
+    {
+      "id": "280a10ffb9c5f472",
+      "type": "function",
+      "name": "pagePropertyToText",
+      "file": "src/download.js",
+      "line": 81,
+      "endLine": 157,
+      "signature": "(prop)",
+      "description": "",
+      "keywords": [
+        "page",
+        "property",
+        "to",
+        "text"
+      ],
+      "hash": "d7812111e305207f",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.629Z"
+    },
+    {
+      "id": "7a72942cd16d1070",
+      "type": "function",
+      "name": "childDatabaseToMarkdownTable",
+      "file": "src/download.js",
+      "line": 159,
+      "endLine": 257,
+      "signature": "(block, ctx, titleForErrors)",
+      "description": "",
+      "keywords": [
+        "child",
+        "database",
+        "to",
+        "markdown",
+        "table"
+      ],
+      "hash": "fe64263e8a9bdac2",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.629Z"
+    },
+    {
+      "id": "00bbaf9e3c6cf3e8",
+      "type": "function",
+      "name": "resolveSyncedBlockChildren",
+      "file": "src/download.js",
+      "line": 259,
+      "endLine": 284,
+      "signature": "(block, ctx, titleForErrors)",
+      "description": "",
+      "keywords": [
+        "resolve",
+        "synced",
+        "block",
+        "children"
+      ],
+      "hash": "a9207080207b7f42",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.630Z"
+    },
+    {
+      "id": "9d418bccbf325f9d",
+      "type": "function",
+      "name": "convertBlockParts",
+      "file": "src/download.js",
+      "line": 291,
+      "endLine": 313,
+      "signature": "(markdownParts, n2m, titleForErrors, stats, onError)",
+      "description": "Convert block segments in markdownParts to markdown strings (one pass).\nReturns an array mirroring markdownParts where block entries have a `content`\nfield with the converted markdown, and link entries are passed through as-is.",
+      "keywords": [
+        "convert",
+        "block",
+        "parts"
+      ],
+      "hash": "23b40c3610321984",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.630Z"
+    },
+    {
+      "id": "98b0899515ef3b5a",
+      "type": "function",
+      "name": "assembleMarkdown",
+      "file": "src/download.js",
+      "line": 319,
+      "endLine": 350,
+      "signature": "(convertedParts, childResults = new Map())",
+      "description": "Assemble pre-converted parts into a final markdown string.\nUses childResults to determine link format: leaf children get flat links.",
+      "keywords": [
+        "assemble",
+        "markdown"
+      ],
+      "hash": "25934361588e51db",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.630Z"
+    },
+    {
+      "id": "9cb00a6b56c67b32",
+      "type": "function",
+      "name": "blocksToInlineParts",
+      "file": "src/download.js",
+      "line": 352,
+      "endLine": 453,
+      "signature": "(blocks, ctx, visited, depth, titleForErrors, assetsDirForFlatChildren)",
+      "description": "",
+      "keywords": [
+        "blocks",
+        "to",
+        "inline",
+        "parts"
+      ],
+      "hash": "8b83b9c6d75da550",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.630Z"
+    },
+    {
+      "id": "d252cc95fae58a4d",
+      "type": "function",
+      "name": "flush",
+      "file": "src/download.js",
+      "line": 356,
+      "endLine": 361,
+      "signature": "()",
+      "description": "",
+      "keywords": [
+        "flush"
+      ],
+      "hash": "cbafdc2c639d8fe0",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.630Z"
+    },
+    {
+      "id": "f6303bc39f45378f",
+      "type": "function",
+      "name": "downloadPages",
+      "file": "src/download.js",
+      "line": 463,
+      "endLine": 501,
+      "signature": "(selectedItems, savePath, notion, { onStatus, onLog, onError }, { flat = false, debug = false } = {})",
+      "description": "Download selected pages/databases to the local filesystem.\n\nCallbacks:\n  onStatus(message)  – spinner/progress text (frequently updated)\n  onLog(message)     – milestone log line (page saved, db started, etc.)\n  onError(message)   – error log line (shown immediately, not batched)",
+      "keywords": [
+        "download",
+        "pages"
+      ],
+      "hash": "750c8d450117d382",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.630Z"
+    },
+    {
+      "id": "f44947da804ff851",
+      "type": "function",
+      "name": "downloadPage",
+      "file": "src/download.js",
+      "line": 509,
+      "endLine": 672,
+      "signature": "(pageId, name, parentDir, ctx, visited, depth, isTopLevel = false)",
+      "description": "Recursively download a single page and its children.\nFetches blocks once through the throttled API wrapper, then:\n  1. Passes them to notion-to-md for markdown conversion (no extra API calls)\n  2. Extracts child_page/child_database blocks for recursion",
+      "keywords": [
+        "download",
+        "page"
+      ],
+      "hash": "d0ad8f16af971c79",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.631Z"
+    },
+    {
+      "id": "19558cdd04825ff7",
+      "type": "function",
+      "name": "downloadDatabase",
+      "file": "src/download.js",
+      "line": 677,
+      "endLine": 813,
+      "signature": "(databaseId, name, parentDir, ctx, visited, depth)",
+      "description": "Download a database: create a folder and download each row as a page.",
+      "keywords": [
+        "download",
+        "database"
+      ],
+      "hash": "b56053aabc56f324",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.631Z"
+    },
+    {
+      "id": "13f027ed84c4b511",
+      "type": "function",
+      "name": "processAssets",
+      "file": "src/download.js",
+      "line": 819,
+      "endLine": 865,
+      "signature": "(markdown, pageDir, stats, ctx)",
+      "description": "Find and download all images/files in markdown content.\nRewrites URLs to relative ./assets/ paths using a single-pass replacement.",
+      "keywords": [
+        "process",
+        "assets"
+      ],
+      "hash": "60a580532bd5b49d",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.631Z"
+    },
+    {
+      "id": "573461e99e4bf56f",
+      "type": "function",
+      "name": "isAllowedUrl",
+      "file": "src/download.js",
+      "line": 870,
+      "endLine": 882,
+      "signature": "(url)",
+      "description": "Check if a URL is safe to fetch (not a private/internal address).",
+      "keywords": [
+        "is",
+        "allowed",
+        "url"
+      ],
+      "hash": "82ca6837caf33150",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "8c5a27627a12e968",
+      "type": "function",
+      "name": "runWithConcurrency",
+      "file": "src/download.js",
+      "line": 887,
+      "endLine": 899,
+      "signature": "(items, limit, fn)",
+      "description": "Run async tasks with bounded concurrency.",
+      "keywords": [
+        "run",
+        "with",
+        "concurrency"
+      ],
+      "hash": "6ef5859416646119",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "9a14f54688457a06",
+      "type": "function",
+      "name": "worker",
+      "file": "src/download.js",
+      "line": 890,
+      "endLine": 895,
+      "signature": "()",
+      "description": "",
+      "keywords": [
+        "worker"
+      ],
+      "hash": "7732261daf620d45",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "cb6f22d79ad3a7f9",
+      "type": "function",
+      "name": "downloadFile",
+      "file": "src/download.js",
+      "line": 904,
+      "endLine": 936,
+      "signature": "(url, destPath)",
+      "description": "Download a file from a URL to a local path with timeout.",
+      "keywords": [
+        "download",
+        "file"
+      ],
+      "hash": "bc48a5bc2c5e8fe1",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "6ae0e1691b676cf8",
+      "type": "function",
+      "name": "getAssetFilename",
+      "file": "src/download.js",
+      "line": 941,
+      "endLine": 969,
+      "signature": "(url, usedNames)",
+      "description": "Extract a suitable filename from a URL.",
+      "keywords": [
+        "get",
+        "asset",
+        "filename"
+      ],
+      "hash": "bd530a6ce0377cc0",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "653dbb947915f295",
+      "type": "function",
+      "name": "buildFrontmatter",
+      "file": "src/download.js",
+      "line": 975,
+      "endLine": 991,
+      "signature": "(properties)",
+      "description": "Build YAML frontmatter from database page properties.\nAll string values are properly quoted to prevent YAML injection.",
+      "keywords": [
+        "build",
+        "frontmatter"
+      ],
+      "hash": "39a5fdc4c4ad18b1",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "51f8ab41b4e12209",
+      "type": "function",
+      "name": "escapeYaml",
+      "file": "src/download.js",
+      "line": 993,
+      "endLine": 995,
+      "signature": "(str)",
+      "description": "",
+      "keywords": [
+        "escape",
+        "yaml"
+      ],
+      "hash": "f535a4d770635071",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "7374dc32ce0c7ced",
+      "type": "function",
+      "name": "yamlString",
+      "file": "src/download.js",
+      "line": 997,
+      "endLine": 1000,
+      "signature": "(val)",
+      "description": "",
+      "keywords": [
+        "yaml",
+        "string"
+      ],
+      "hash": "ee2485f75c2e72e1",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "4e1db3562642dbda",
+      "type": "function",
+      "name": "extractPropertyValue",
+      "file": "src/download.js",
+      "line": 1002,
+      "endLine": 1033,
+      "signature": "(prop)",
+      "description": "",
+      "keywords": [
+        "extract",
+        "property",
+        "value"
+      ],
+      "hash": "0af4d42b6da88b9f",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "id": "1aa3e2b5b67e3159",
+      "type": "class",
+      "name": "NotionClient",
+      "file": "src/notion.js",
+      "line": 7,
+      "endLine": 271,
+      "signature": "class NotionClient",
+      "description": "Thin wrapper around the Notion API with built-in rate limiting and pagination.",
+      "keywords": [
+        "notion",
+        "client"
+      ],
+      "hash": "d20704b6ee8c569a",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.637Z"
+    },
+    {
+      "id": "6f297e8f19ea1825",
+      "type": "function",
+      "name": "extractTitle",
+      "file": "src/notion.js",
+      "line": 273,
+      "endLine": 353,
+      "signature": "(page)",
+      "description": "",
+      "keywords": [
+        "extract",
+        "title"
+      ],
+      "hash": "39f3ed4e20444a30",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.637Z"
+    },
+    {
+      "id": "b6506027ce4cb80e",
+      "type": "function",
+      "name": "toPlainText",
+      "file": "src/notion.js",
+      "line": 276,
+      "endLine": 282,
+      "signature": "(value)",
+      "description": "",
+      "keywords": [
+        "to",
+        "plain",
+        "text"
+      ],
+      "hash": "05dbabd5f79cd651",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.637Z"
+    },
+    {
+      "id": "1db9edbd17b7c19f",
+      "type": "function",
+      "name": "findTitleArray",
+      "file": "src/notion.js",
+      "line": 285,
+      "endLine": 305,
+      "signature": "(value)",
+      "description": "",
+      "keywords": [
+        "find",
+        "title",
+        "array"
+      ],
+      "hash": "e647b0480fdef585",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.637Z"
+    },
+    {
+      "id": "2d02c4cab41a51fe",
+      "type": "function",
+      "name": "extractDatabaseTitle",
+      "file": "src/notion.js",
+      "line": 358,
+      "endLine": 363,
+      "signature": "(db)",
+      "description": "Extract a database's title.",
+      "keywords": [
+        "extract",
+        "database",
+        "title"
+      ],
+      "hash": "aa0710673448bc83",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.637Z"
+    },
+    {
+      "id": "b18a16c3ef8c9934",
+      "type": "constant",
+      "name": "FOLDER_NAME",
+      "file": "src/utils.js",
+      "line": 8,
+      "endLine": 8,
+      "signature": "",
+      "description": "",
+      "keywords": [
+        "folder",
+        "name"
+      ],
+      "hash": "94925e9f23e8d696",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.638Z"
+    },
+    {
+      "id": "2d058d4dd989eda7",
+      "type": "function",
+      "name": "getDefaultSavePath",
+      "file": "src/utils.js",
+      "line": 13,
+      "endLine": 15,
+      "signature": "()",
+      "description": "Get the default save path based on the OS.",
+      "keywords": [
+        "get",
+        "default",
+        "save",
+        "path"
+      ],
+      "hash": "555468b0ac2e2132",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.638Z"
+    },
+    {
+      "id": "829f9736f90b8c09",
+      "type": "function",
+      "name": "getSaveLocationOptions",
+      "file": "src/utils.js",
+      "line": 21,
+      "endLine": 70,
+      "signature": "()",
+      "description": "Build a list of common save locations that exist on this machine.\nAdapts to the current OS — only shows folders that exist.",
+      "keywords": [
+        "get",
+        "save",
+        "location",
+        "options"
+      ],
+      "hash": "1ee8b263105a69bd",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.638Z"
+    },
+    {
+      "id": "865210f7a94aee63",
+      "type": "function",
+      "name": "shortenPath",
+      "file": "src/utils.js",
+      "line": 75,
+      "endLine": 80,
+      "signature": "(fullPath, home)",
+      "description": "Shorten a path for display by replacing the home directory with ~.",
+      "keywords": [
+        "shorten",
+        "path"
+      ],
+      "hash": "2f3d5ba5b846d3c9",
+      "exported": false,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.638Z"
+    },
+    {
+      "id": "082e1b688bb3ca7c",
+      "type": "function",
+      "name": "isWritablePath",
+      "file": "src/utils.js",
+      "line": 85,
+      "endLine": 106,
+      "signature": "(targetPath)",
+      "description": "Check if a path is writable (or its parent is writable for new dirs).",
+      "keywords": [
+        "is",
+        "writable",
+        "path"
+      ],
+      "hash": "4f66b768eb68bc16",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.638Z"
+    },
+    {
+      "id": "2c321e68a7fad02b",
+      "type": "function",
+      "name": "sanitizeFilename",
+      "file": "src/utils.js",
+      "line": 123,
+      "endLine": 151,
+      "signature": "(title, maxLength = 200)",
+      "description": "Sanitize a string for use as a filename on any OS.\nStrips invalid characters, handles reserved names,\ntrims trailing dots/spaces, and truncates to maxLength.",
+      "keywords": [
+        "sanitize",
+        "filename"
+      ],
+      "hash": "d269c9feabedf7e1",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.639Z"
+    },
+    {
+      "id": "5e01282da7ac481e",
+      "type": "function",
+      "name": "uniqueFilename",
+      "file": "src/utils.js",
+      "line": 157,
+      "endLine": 170,
+      "signature": "(name, existingNames)",
+      "description": "Generate a unique filename among existing names.\nIf \"Meeting Notes\" already exists, returns \"Meeting Notes (2)\", etc.",
+      "keywords": [
+        "unique",
+        "filename"
+      ],
+      "hash": "b2e027afd920d497",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.639Z"
+    },
+    {
+      "id": "ef652d57f7dabe7c",
+      "type": "function",
+      "name": "slugifyFilename",
+      "file": "src/utils.js",
+      "line": 178,
+      "endLine": 189,
+      "signature": "(title)",
+      "description": "Convert a title to a web-safe, LLM-friendly slug for filenames.\nConverts to lowercase, replaces spaces/underscores with hyphens,\nstrips all non-alphanumeric characters except hyphens.\nExample: \"🚀 Project Alpha & Beta (2026)!\" → \"project-alpha-beta-2026\"",
+      "keywords": [
+        "slugify",
+        "filename"
+      ],
+      "hash": "d83427d88c39bf63",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.639Z"
+    },
+    {
+      "id": "a6a4b9942524ebdc",
+      "type": "function",
+      "name": "ensureDir",
+      "file": "src/utils.js",
+      "line": 194,
+      "endLine": 196,
+      "signature": "(dirPath)",
+      "description": "Recursively create a directory if it doesn't exist.",
+      "keywords": [
+        "ensure",
+        "dir"
+      ],
+      "hash": "be2997d6e2a938ad",
+      "exported": true,
+      "usageCount": 0,
+      "indexedAt": "2026-05-28T17:34:09.639Z"
+    }
+  ],
+  "stats": {
+    "totalPatterns": 48,
+    "totalFiles": 5,
+    "byType": {
+      "function": 43,
+      "constant": 4,
+      "class": 1
+    },
+    "indexDurationMs": 57
+  },
+  "files": [
+    {
+      "path": "src/cli.js",
+      "hash": "868ffa07af1c6a69",
+      "patternCount": 4,
+      "indexedAt": "2026-05-28T17:34:09.619Z"
+    },
+    {
+      "path": "src/config.js",
+      "hash": "f3d54be557125974",
+      "patternCount": 2,
+      "indexedAt": "2026-05-28T17:34:09.620Z"
+    },
+    {
+      "path": "src/download.js",
+      "hash": "03d206968f791abf",
+      "patternCount": 28,
+      "indexedAt": "2026-05-28T17:34:09.632Z"
+    },
+    {
+      "path": "src/notion.js",
+      "hash": "4553cb3e02bcd4fd",
+      "patternCount": 5,
+      "indexedAt": "2026-05-28T17:34:09.638Z"
+    },
+    {
+      "path": "src/utils.js",
+      "hash": "b72f1a6981608d1c",
+      "patternCount": 9,
+      "indexedAt": "2026-05-28T17:34:09.639Z"
+    }
+  ]
+}
