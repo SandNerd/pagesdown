@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, chmod, access } from 'node:fs/promises';
+import { mkdtemp, rm, chmod, access, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -36,6 +36,8 @@ test('ensureDir creates directories recursively', async () => {
     const nested = path.join(base, 'a', 'b', 'c');
     await ensureDir(nested);
     await access(nested);
+    const st = await stat(nested);
+    assert.ok(st.isDirectory());
   } finally {
     await rm(base, { recursive: true, force: true });
   }

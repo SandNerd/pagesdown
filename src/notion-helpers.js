@@ -1,4 +1,7 @@
 import * as p from '@clack/prompts';
+import { formatErrorForLogging } from './error.js';
+const debug = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
+function _debugLog(err) { if (!debug || !err) return; try { p.log.info(formatErrorForLogging(err, { debug: true })); } catch (e) {} }
 
 export function extractTitle(page) {
   if (!page) return 'Untitled';
@@ -52,7 +55,7 @@ export function extractTitle(page) {
       if (prop && prop.type === 'title') {
         const text = findTitleArray(prop.title) || findTitleArray(prop);
         if (text) {
-          try { if (process.env.NOTIONDRIVE_DEBUG) p.log.info(`[notiondrive] extractTitle: using property '${key}' as title`); } catch {}
+          try { if (process.env.DEBUG) p.log.info(`[notiondrive] extractTitle: using property '${key}' as title`); } catch (err) { _debugLog(err); }
           return text;
         }
       }
@@ -61,7 +64,7 @@ export function extractTitle(page) {
 
   const fallbackTitle = findTitleArray(page);
   if (fallbackTitle) {
-    try { if (process.env.NOTIONDRIVE_DEBUG) p.log.info('[notiondrive] extractTitle: using fallback scan to locate title'); } catch {}
+    try { if (process.env.DEBUG) p.log.info('[notiondrive] extractTitle: using fallback scan to locate title'); } catch (err) { _debugLog(err); }
     return fallbackTitle;
   }
 
@@ -73,10 +76,10 @@ export function extractTitle(page) {
       const slug = lastSegment.replace(/-[a-f0-9]{32}$/i, '');
       const decoded = decodeURIComponent(slug).replace(/[-_]+/g, ' ').trim();
       if (decoded) {
-        try { if (process.env.NOTIONDRIVE_DEBUG) p.log.info('[notiondrive] extractTitle: derived title from URL slug'); } catch {}
+        try { if (process.env.DEBUG) p.log.info('[notiondrive] extractTitle: derived title from URL slug'); } catch (err) { _debugLog(err); }
         return decoded;
       }
-    } catch {}
+    } catch (err) { _debugLog(err); }
   }
 
   const idFallback = page?.id || page?.page_id || page?.database_id || page?.parent?.page_id || page?.parent?.database_id;

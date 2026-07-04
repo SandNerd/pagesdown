@@ -1,6 +1,9 @@
 import path from 'node:path';
 import os from 'node:os';
 import * as p from '@clack/prompts';
+import { wrapError, formatErrorForLogging } from './error.js';
+const debug = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
+function _debugLog(err) { if (!debug || !err) return; try { p.log.info(formatErrorForLogging(err, { debug: true })); } catch (e) {} }
 import { NotionClient } from './notion.js';
 import { extractTitle, extractDatabaseTitle } from './notion-helpers.js';
 import { downloadPages } from './download.js';
@@ -64,7 +67,7 @@ async function getManifestEntriesForPath(absoluteLocalPath) {
               source: t.source || '<none>' 
             });
           }
-        } catch (err) {}
+        } catch (err) { _debugLog(err); }
       }
       if (matches.length > 0) results.push({ manifestPath: c.path, matches });
     } catch (err) {
@@ -102,58 +105,145 @@ async function pushLocalFileToNotion({ notion, pageId, targetItem, target, local
   }
   const uploadContentRaw = await applyFrontmatterTarget(notion, pageId, target, localContent);
 
-  // Extract leading H1 to use as title and avoid body duplication
-  let uploadContent = uploadContentRaw;
-  let scanContent = uploadContent;
-  let fmMatch = null;
-  if (uploadContent.startsWith('---')) {
-    fmMatch = uploadContent.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-    if (fmMatch) {
-      scanContent = uploadContent.slice(fmMatch[0].length);
-    }
-  }
+  // Frontmatter should never be included in page body uploads.
+  // applyFrontmatterTarget already strips YAML from the markdown.
+  let normalizedUploadContentRaw = uploadContentRaw;
+  normalizedUploadContentRaw = stripLeadingFrontmatter(normalizedUploadContentRaw);
 
-  const bodyLines = scanContent.split('\n');
-  let h1Index = -1;
-  let extractedTitle = null;
-  for (let i = 0; i < bodyLines.length; i++) {
-    const trimmed = bodyLines[i].trim();
-    if (!trimmed) continue;
-    if (trimmed.startsWith('# ')) {
-      h1Index = i;
-      extractedTitle = trimmed.slice(2).trim();
-    }
-    break;
-  }
+  const uploadHasExplicitTitleOverride = target?.title === 'filename' || target?.title === 'relativePath';
 
-  if (extractedTitle) {
-    try {
-      const page = await notion.getPage(pageId);
-      let titleKey = 'title';
-      for (const [key, prop] of Object.entries(page.properties || {})) {
-        if (prop.type === 'title') {
-          titleKey = key;
-          break;
-        }
+  // Optionally force the Notion page title to match the local filename derived title.
+  // When enabled we must bypass the legacy "extract and strip first H1" logic.
+  let uploadContent = normalizedUploadContentRaw;
+  if (uploadHasExplicitTitleOverride) {
+    const desiredTitle = target?.title === 'relativePath'
+      ? (target.relativePath || target.filename || path.basename(localOutputPath))
+      : (target?.filename || path.basename(localOutputPath));
+    const oldCloudTitle = extractTitle(await notion.getPage(pageId));
+
+    // If the previous cloud title equals the value extracted from the
+    // configured frontmatter key (e.g., YAML `description:` injected into
+    // Notion property `Description`), avoid demoting that title into the
+    // page body. This prevents frontmatter-like content from reappearing
+    // as a large heading when `title: "filename"` is enabled.
+    let skipDemotion = false;
+    if (target?.frontmatter && typeof target.frontmatter === 'string') {
+      const parsedFrontmatter = extractLeadingFrontmatter(localContent);
+      if (parsedFrontmatter?.raw) {
+        const extracted = extractFrontmatterKeyValue(parsedFrontmatter.raw, target.frontmatter);
+        skipDemotion = extracted != null && String(oldCloudTitle) === String(extracted);
       }
+    }
 
-      const currentTitle = extractTitle(page);
-      if (currentTitle !== extractedTitle) {
+    let scanContent = uploadContent;
+    let fmMatch = null;
+    if (scanContent.startsWith('---')) {
+      fmMatch = scanContent.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+      if (fmMatch) {
+        scanContent = scanContent.slice(fmMatch[0].length);
+      }
+    }
+
+    const bodyText = scanContent;
+    const demotionHeader = `# ${oldCloudTitle}`;
+    const bodyContainsExactHeader = bodyText.split('\n').some((line) => line.trim() === demotionHeader);
+
+    if (oldCloudTitle && oldCloudTitle !== desiredTitle && !bodyContainsExactHeader && !skipDemotion) {
+      const insertion = `${demotionHeader}\n\n`;
+      uploadContent = insertion + scanContent;
+
+      try {
+        await notion.client.pages.update({
+          page_id: pageId,
+          properties: Object.entries((await notion.getPage(pageId))?.properties || {})
+            .filter(([, prop]) => prop && prop.type === 'title')
+            .reduce((acc, [titleKey]) => {
+              acc[titleKey] = {
+                title: [{ type: 'text', text: { content: desiredTitle } }],
+              };
+              return acc;
+            }, {}),
+        });
+      } catch {
+        // Fall back to normal push content behavior if title update fails.
+      }
+    } else if (oldCloudTitle !== desiredTitle) {
+      // Still need to align title, even if demotion header already exists.
+      try {
+        const page = await notion.getPage(pageId);
+        let titleKey = 'title';
+        for (const [key, prop] of Object.entries(page.properties || {})) {
+          if (prop.type === 'title') {
+            titleKey = key;
+            break;
+          }
+        }
+
         await notion.client.pages.update({
           page_id: pageId,
           properties: {
             [titleKey]: {
-              title: [{ type: 'text', text: { content: extractedTitle } }],
+              title: [{ type: 'text', text: { content: desiredTitle } }],
             },
           },
         });
+      } catch {
+        // ignore
       }
+    }
+  } else {
+    // Extract leading H1 to use as title and avoid body duplication
+    let scanContent = uploadContentRaw;
+    let fmMatch = null;
+    if (uploadContentRaw.startsWith('---')) {
+      fmMatch = uploadContentRaw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+      if (fmMatch) {
+        scanContent = uploadContentRaw.slice(fmMatch[0].length);
+      }
+    }
 
-      // Remove H1 from body to prevent duplication
-      const newBody = bodyLines.filter((_, idx) => idx !== h1Index).join('\n');
-      uploadContent = (fmMatch ? fmMatch[0] : '') + newBody;
-    } catch (err) {
-      if (process.env.NOTIONDRIVE_DEBUG) console.error(`[DEBUG] Failed to sync H1 title: ${err.message}`);
+    const bodyLines = scanContent.split('\n');
+    let h1Index = -1;
+    let extractedTitle = null;
+    for (let i = 0; i < bodyLines.length; i++) {
+      const trimmed = bodyLines[i].trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith('# ')) {
+        h1Index = i;
+        extractedTitle = trimmed.slice(2).trim();
+      }
+      break;
+    }
+
+    if (extractedTitle) {
+      try {
+        const page = await notion.getPage(pageId);
+        let titleKey = 'title';
+        for (const [key, prop] of Object.entries(page.properties || {})) {
+          if (prop.type === 'title') {
+            titleKey = key;
+            break;
+          }
+        }
+
+        const currentTitle = extractTitle(page);
+        if (currentTitle !== extractedTitle) {
+          await notion.client.pages.update({
+            page_id: pageId,
+            properties: {
+              [titleKey]: {
+                title: [{ type: 'text', text: { content: extractedTitle } }],
+              },
+            },
+          });
+        }
+
+        // Remove H1 from body to prevent duplication
+        const newBody = bodyLines.filter((_, idx) => idx !== h1Index).join('\n');
+        uploadContent = newBody;
+      } catch (err) {
+        if (process.env.DEBUG) console.error(`[DEBUG] Failed to sync H1 title: ${err.message}`);
+      }
     }
   }
 
@@ -181,7 +271,7 @@ async function pushLocalFileToNotion({ notion, pageId, targetItem, target, local
   return appended;
 }
 
-async function fetchDependencySnapshot(notion, dependency) {
+function fetchDependencySnapshot(notion, dependency) {
   if (!dependency || !dependency.id || !dependency.type) return null;
   if (dependency.type === 'page') return notion.getPage(dependency.id);
   if (dependency.type === 'database') return notion.getDatabase(dependency.id);
@@ -200,7 +290,8 @@ async function dependenciesChanged(notion, dependencies) {
         liveMtime: live?.last_edited_time || null,
         changed: String(live?.last_edited_time || null) !== String(dependency.mtime || null),
       };
-    } catch {
+    } catch (err) {
+      _debugLog(err);
       return { dependency, liveMtime: null, changed: true };
     }
   }));
@@ -224,6 +315,32 @@ function extractLeadingFrontmatter(localContent) {
   };
 }
 
+function stripLeadingFrontmatter(localContent) {
+  if (typeof localContent !== 'string') return localContent;
+  const fm = extractLeadingFrontmatter(localContent);
+  return fm ? fm.body : localContent;
+}
+
+function extractFrontmatterKeyValue(frontmatterRaw, key) {
+  if (typeof frontmatterRaw !== 'string' || typeof key !== 'string' || !key.trim()) return null;
+  const keyLower = key.trim().toLowerCase();
+  const lines = frontmatterRaw.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*:\s*(.+)$/);
+    if (!m) continue;
+    const k = String(m[1]).trim().toLowerCase();
+    if (k !== keyLower) continue;
+    let v = String(m[2]).trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    return v;
+  }
+  return null;
+}
+
 async function applyFrontmatterTarget(notion, pageId, target, localContent) {
   const frontmatter = extractLeadingFrontmatter(localContent);
 
@@ -232,21 +349,91 @@ async function applyFrontmatterTarget(notion, pageId, target, localContent) {
       throw new Error('Notion client does not support frontmatter injection');
     }
 
+    // Notion API enforces a ~2000 char limit on rich_text segments. Split
+    // long frontmatter content into multiple text objects to avoid API
+    // validation errors when the frontmatter is large.
+    const MAX = 2000;
+    const raw = String(frontmatter.raw || '');
+    const chunks = [];
+    if (raw.length <= MAX) {
+      chunks.push(raw);
+    } else {
+      const lines = raw.split('\n');
+      let current = '';
+      for (const line of lines) {
+        const next = current ? current + '\n' + line : line;
+        if (next.length > MAX) {
+          if (current) {
+            chunks.push(current);
+            current = line;
+            if (current.length > MAX) {
+              let start = 0;
+              while (start < current.length) {
+                chunks.push(current.slice(start, start + MAX));
+                start += MAX;
+              }
+              current = '';
+            }
+          } else {
+            let start = 0;
+            while (start < line.length) {
+              chunks.push(line.slice(start, start + MAX));
+              start += MAX;
+            }
+            current = '';
+          }
+        } else {
+          current = next;
+        }
+      }
+      if (current) chunks.push(current);
+    }
+
+    const extractedValue = extractFrontmatterKeyValue(frontmatter.raw, target.frontmatter);
+    const yamlOrValue = extractedValue != null ? extractedValue : raw;
+
+    const chunksFromYamlOrValue = [];
+    const yamlOrValueStr = String(yamlOrValue || '');
+    if (yamlOrValueStr.length <= MAX) {
+      chunksFromYamlOrValue.push(yamlOrValueStr);
+    } else {
+      const lines = yamlOrValueStr.split('\n');
+      let current = '';
+      for (const line of lines) {
+        const next = current ? current + '\n' + line : line;
+        if (next.length > MAX) {
+          if (current) {
+            chunksFromYamlOrValue.push(current);
+            current = line;
+          } else {
+            let start = 0;
+            while (start < line.length) {
+              chunksFromYamlOrValue.push(line.slice(start, start + MAX));
+              start += MAX;
+            }
+          }
+        } else {
+          current = next;
+        }
+      }
+      if (current) chunksFromYamlOrValue.push(current);
+    }
+
+    const rich_text = chunksFromYamlOrValue.map((c) => ({ type: 'text', text: { content: c } }));
     await notion.client.pages.update({
       page_id: pageId,
       properties: {
         [target.frontmatter]: {
-          rich_text: [{ type: 'text', text: { content: frontmatter.raw } }],
+          rich_text,
         },
       },
     });
   }
 
-  if (frontmatter && target?.frontmatter !== true) {
-    return frontmatter.body;
-  }
-
-  return localContent;
+  // Frontmatter should never be included in the pushed page body.
+  // If `frontmatter` is configured as a string, it is injected into that
+  // Notion property above. Otherwise it is ignored.
+  return frontmatter ? frontmatter.body : localContent;
 }
 
 /**
@@ -331,9 +518,9 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
                     }
                     found.push({ manifestPath: cpath, index: i, filename: fn, name: t.name || '<no-name>' });
                   }
-                } catch (err) {}
+                } catch (err) { _debugLog(err); }
               }
-            } catch (err) {}
+            } catch (err) { _debugLog(err); }
           }
           if (found.length > 0) {
             detailMsg += '\nConflicting definitions found in manifests:';
@@ -354,6 +541,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
     // Non-fatal: guardrail failures should not block sync unless they explicitly
     // detected a collision and returned above. Continue if an unexpected error
     // occurred during the preflight.
+    _debugLog(err);
   }
 
   try {
@@ -426,6 +614,10 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
         if (groupFilter && t.group !== groupFilter) return false;
         if (!syncFilter) return true;
 
+        // Ensure targets expressed via `path` (e.g. from group path + relativePath)
+        // are normalized into legacy `outDir`/`filename` before we compute matches.
+        normalizeTarget(t);
+
         const targetPageId = extractNotionId(t.source || '');
         const targetFilename = t.filename || `${slugifyFilename(t.name || targetPageId)}.md`;
 
@@ -441,7 +633,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
           if (isFilterDirectory) {
             targetDirAbsolute = await fs.realpath(targetDirAbsolute);
           }
-        } catch {}
+        } catch (err) { _debugLog(err); }
 
         if (isFilterDirectory) {
           try {
@@ -449,7 +641,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
             if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
               return true;
             }
-          } catch {}
+          } catch (err) { _debugLog(err); }
           return t.group === syncFilter;
         }
 
@@ -464,7 +656,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
           if (typeof filterAbsoluteLocalPath === 'string' && typeof targetAbsoluteLocalPath === 'string') {
             pathPrefixMatches = targetAbsoluteLocalPath === filterAbsoluteLocalPath || targetAbsoluteLocalPath.startsWith(filterAbsoluteLocalPath);
           }
-        } catch {}
+        } catch (err) { _debugLog(err); }
 
         return (
           t.source === syncFilter ||
@@ -504,7 +696,16 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
 
   // Load or initialize local state ledger (unless no-cache requested)
   const useLedger = !args?.noCache;
-  let ledger = useLedger ? await loadStateLedgerFn() : { byNotionId: {}, byPath: {} };
+  let ledger;
+  if (useLedger) {
+    try {
+      ledger = await loadStateLedgerFn();
+    } catch {
+      ledger = { byNotionId: {}, byPath: {} };
+    }
+  } else {
+    ledger = { byNotionId: {}, byPath: {} };
+  }
   // Work on a clone of the loaded ledger to avoid mutating external references
   if (useLedger && ledger && typeof ledger === 'object') {
     try {
@@ -534,13 +735,98 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
 
     const identifier = target.name || target.filename || pageId;
 
+    // Used for desiredTitle selection when aligning titles for `title: "filename"`.
+    // It is populated later when we resolve the matching local output file.
+    let resolvedCandidate = null;
+
     // Fetch page/database info
     let targetItem;
     try {
       let page;
       try {
         page = await notion.getPage(pageId);
-        const name = extractTitle(page) || 'Exported-Page';
+
+        let name = extractTitle(page) || 'Exported-Page';
+
+        if (target?.title === 'filename' || target?.title === 'relativePath') {
+          resolvedCandidate = null;
+          if (!target?.filename) {
+            // Resolve the local output candidate early so desiredTitle can match the actual file basename.
+            const rawOutDir = target.outDir || process.cwd();
+            const expandedOutDir = rawOutDir.startsWith('~') ? path.join(process.env.HOME || os.homedir(), rawOutDir.slice(1)) : rawOutDir;
+            const outDir = path.resolve(expandedOutDir);
+
+            const slugName = slugifyFilename(name);
+            const candidatePathsToProbe = [
+              path.join(outDir, `${slugName}.md`),
+              path.join(outDir, slugName, `${slugName}.md`),
+              path.join(outDir, `${slugName}.csv`),
+            ];
+
+            for (const candidate of candidatePathsToProbe) {
+              try {
+                await fs.stat(candidate);
+                resolvedCandidate = { candidate };
+                break;
+              } catch {
+                continue;
+              }
+            }
+          }
+
+          let desiredTitle;
+          if (target?.title === 'relativePath') {
+            desiredTitle = target.relativePath || target.filename || name;
+          } else {
+            desiredTitle = target?.filename || (resolvedCandidate ? path.basename(resolvedCandidate.candidate) : `${slugifyFilename(name)}.md`);
+          }
+          const currentCloudTitle = name;
+
+          if (currentCloudTitle !== desiredTitle) {
+            try {
+              const children = await notion.getBlockChildren(pageId);
+              const first = Array.isArray(children) ? children[0] : null;
+
+              const getHeading1PlainText = (block) => {
+                if (!block || block.type !== 'heading_1') return '';
+                if (!block.heading_1?.rich_text) return '';
+                return block.heading_1.rich_text.map((t) => t?.plain_text || t?.text?.content || '').join('');
+              };
+
+              const needsDemotion = !first || first.type !== 'heading_1' || getHeading1PlainText(first) !== currentCloudTitle;
+              if (needsDemotion) {
+                const demotionBlocks = markdownToNotionBlocks(`# ${currentCloudTitle}`, `notiondrive-${pageId}.md`);
+                const demotionBlock = demotionBlocks[0] || null;
+                const updatedBlocks = demotionBlock ? [demotionBlock, ...(children || [])] : (children || []);
+
+                await notion.clearPageContent(pageId);
+                await notion.appendPageContent(pageId, updatedBlocks);
+              }
+
+              let titleKey = 'title';
+              for (const [key, prop] of Object.entries(page.properties || {})) {
+                if (prop?.type === 'title') {
+                  titleKey = key;
+                  break;
+                }
+              }
+
+              await notion.client.pages.update({
+                page_id: pageId,
+                properties: {
+                  [titleKey]: {
+                    title: [{ type: 'text', text: { content: desiredTitle } }],
+                  },
+                },
+              });
+
+              name = desiredTitle;
+            } catch (err) {
+              _debugLog(err);
+            }
+          }
+        }
+
         const remoteMtime = (target.sync === 'push-only') ? null : page?.last_edited_time || null;
         targetItem = { id: pageId, name, type: 'page', customFilename: target.filename, remoteMtime };
       } catch {
@@ -589,7 +875,15 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
         ];
       }
     } else {
-      slugName = slugifyFilename(targetItem.name || targetItem.id || pageId);
+      if (target?.title === 'filename') {
+        // targetItem.name for this mode is forced to match a local filename (including extension).
+        // Avoid re-slugifying and accidentally mangling the extension into the basename.
+        const ext = path.extname(targetItem.name || '').toLowerCase();
+        const base = ext ? path.basename(targetItem.name, ext) : targetItem.name;
+        slugName = base || slugifyFilename(targetItem.id || pageId);
+      } else {
+        slugName = slugifyFilename(targetItem.name || targetItem.id || pageId);
+      }
       candidatePaths = [
         path.join(outDir, `${slugName}.md`),
         path.join(outDir, slugName, `${slugName}.md`),
@@ -597,7 +891,7 @@ export async function executeSyncMode(manifest, token, args, overrides = {}) {
       ];
     }
 
-    let resolvedCandidate = null;
+    resolvedCandidate = null;
     for (const candidate of candidatePaths) {
       try {
         await fs.stat(candidate);
@@ -1019,7 +1313,12 @@ export async function executeStatus(manifest, token, args = {}, overrides = {}) 
   }
 
   const loadStateLedgerFn = overrides.loadStateLedger || loadStateLedger;
-  const ledger = await loadStateLedgerFn();
+  let ledger;
+  try {
+    ledger = await loadStateLedgerFn();
+  } catch {
+    ledger = { byNotionId: {}, byPath: {} };
+  }
 
   const results = [];
   const counts = { upToDate: 0, needsPull: 0, needsPush: 0, conflict: 0, remoteOnly: 0, localUntracked: 0, disabled: 0, failed: 0 };
@@ -1439,7 +1738,12 @@ export async function startSyncWatchMode(manifest, token, args, overrides = {}) 
   const notion = overrides.notion || new NotionClass(token);
   
   // Load ledger to build file-to-target map
-  let ledger = await loadStateLedgerFn();
+  let ledger;
+  try {
+    ledger = await loadStateLedgerFn();
+  } catch {
+    ledger = { byNotionId: {}, byPath: {} };
+  }
   const fileTargetMap = buildFileTargetMap(manifest, ledger);
   
   if (Object.keys(fileTargetMap).length === 0) {
@@ -1477,7 +1781,11 @@ export async function startSyncWatchMode(manifest, token, args, overrides = {}) 
         metadata.debounceTimer = setTimeout(async () => {
           try {
             // Reload ledger to get latest state
-            ledger = await loadStateLedgerFn();
+            try {
+              ledger = await loadStateLedgerFn();
+            } catch {
+              ledger = { byNotionId: {}, byPath: {} };
+            }
             const record = ledger.byNotionId?.[metadata.pageId]?.outputs?.[path.relative(process.cwd(), changedPath)];
             
             if (!record) return;
@@ -1532,7 +1840,11 @@ export async function startSyncWatchMode(manifest, token, args, overrides = {}) 
     
     // Flush ledger to disk one last time
     try {
-      ledger = await loadStateLedgerFn();
+      try {
+        ledger = await loadStateLedgerFn();
+      } catch {
+        ledger = { byNotionId: {}, byPath: {} };
+      }
       await saveStateLedgerFn(ledger);
       prompts.log.success('[Watcher] Ledger saved. Exiting.');
     } catch (err) {

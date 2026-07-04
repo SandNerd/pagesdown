@@ -23,29 +23,33 @@ function extractNotionId(input){
 
 function flattenManifest(data) {
   if (!data || typeof data !== 'object') return data;
-  const flatTargets = [];
 
-  if (Array.isArray(data.targets)) flatTargets.push(...data.targets);
+  const baseTargets = Array.isArray(data.targets) ? [...data.targets] : [];
 
-  if (Array.isArray(data.groups)) {
-    for (const group of data.groups) {
-      if (!group || typeof group !== 'object') continue;
-      const groupTargets = group.targets;
-      const groupName = group.name;
-      const groupDefaults = {};
-      for (const k in group) {
-        if (k !== 'targets' && k !== 'name') groupDefaults[k] = group[k];
-      }
-      if (Array.isArray(groupTargets)) {
-        for (const target of groupTargets) {
-          if (!target || typeof target !== 'object') continue;
-          flatTargets.push(Object.assign({ group: groupName || groupDefaults.group }, groupDefaults, target));
+  const groupTargets = (Array.isArray(data.groups) ? data.groups : []).flatMap((group) => {
+    if (!group || typeof group !== 'object') return [];
+    const { targets: gTargets, name: groupName, ...groupDefaults } = group;
+    if (!Array.isArray(gTargets)) return [];
+    return gTargets
+      .filter((t) => t && typeof t === 'object')
+      .map((target) => {
+        let resolvedPath = target.path;
+        if (!resolvedPath && target.relativePath && groupDefaults.path) {
+          // Combine group path and target relativePath cleanly
+          resolvedPath = path.join(groupDefaults.path, target.relativePath);
         }
-      }
-    }
-  }
 
-  data.targets = flatTargets;
+        // Include the resolved path in the flattened target object if computed
+        return Object.assign(
+          { group: groupName || groupDefaults.group },
+          groupDefaults,
+          target,
+          resolvedPath ? { path: resolvedPath } : {}
+        );
+      });
+  });
+
+  data.targets = baseTargets.concat(groupTargets);
   return data;
 }
 

@@ -2,6 +2,8 @@ import { NotionToMarkdown } from 'notion-to-md';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { sanitizeFilename, slugifyFilename, uniqueFilename, ensureDir } from './utils.js';
+import { downloadToPath, isAllowedUrl } from './fetch-stream.js';
+import { wrapError } from './error.js';
 import { extractTitle } from './notion-helpers.js';
 
 const MAX_DEPTH = 20;
@@ -15,6 +17,37 @@ const BLOCKED_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '
 const PRIVATE_IP_PREFIXES = ['10.', '192.168.', '169.254.', '172.16.', '172.17.', '172.18.',
   '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.',
   '172.27.', '172.28.', '172.29.', '172.30.', '172.31.'];
+
+async function prefetchRelationTitles(relationIds, notion, concurrency = 6) {
+  const cache = new Map();
+  if (!relationIds || relationIds.size === 0) return cache;
+  const ids = Array.from(relationIds);
+  for (let i = 0; i < ids.length; i += concurrency) {
+    const batch = ids.slice(i, i + concurrency);
+    await Promise.all(batch.map(async (rid) => {
+      try {
+        const relPage = await notion.getPage(rid);
+        const relTitle = extractTitle(relPage) || rid;
+        cache.set(rid, relTitle);
+      } catch {
+        cache.set(rid, rid);
+      }
+    }));
+  }
+  return cache;
+}
+
+function escapeCsvCell(val) {
+  if (val === null || val === undefined) return '';
+  const s = String(val);
+  const mustQuote = /[",\n]/.test(s);
+  const escaped = s.replace(/"/g, '""');
+  return mustQuote ? `"${escaped}"` : escaped;
+}
+
+// Note: fetch/streaming helpers were moved to src/fetch-stream.js and
+// are intentionally not duplicated here to keep streaming lifecycle
+// and error handling in one place for static analysis.
 
 /**
  * Split blocks at child_page/child_database boundaries.
@@ -69,6 +102,28 @@ function normalizeSpacing(md) {
   return md.replace(/\n{3,}/g, '\n\n');
 }
 
+function prepareNumberedLists(blocks) {
+  if (!Array.isArray(blocks)) return blocks;
+
+  function walk(list) {
+    let counter = 0;
+    for (let i = 0; i < list.length; i++) {
+      const block = list[i];
+      if (block && block.type === 'numbered_list_item') {
+        counter = (i > 0 && list[i - 1] && list[i - 1].type === 'numbered_list_item') ? counter + 1 : 1;
+        if (!block.numbered_list_item) block.numbered_list_item = {};
+        block.numbered_list_item.number = counter;
+      } else {
+        counter = 0;
+      }
+      if (block && Array.isArray(block.children)) walk(block.children);
+    }
+  }
+
+  walk(blocks);
+  return blocks;
+}
+
 function escapeTableCell(text) {
   if (text === null || text === undefined) return '';
   return String(text).replace(/\|/g, '\\|').replace(/\n/g, '<br>');
@@ -83,76 +138,73 @@ function pagePropertyToText(prop) {
   if (!prop || typeof prop !== 'object') return '';
   try {
     const formatUser = (user) => user?.name || user?.person?.email || user?.id || '';
-    switch (prop.type) {
-      case 'title':
-        return notionRichTextToPlain(prop.title);
-      case 'rich_text':
-        return notionRichTextToPlain(prop.rich_text);
-      case 'number':
-        return prop.number === null || prop.number === undefined ? '' : String(prop.number);
-      case 'select':
-        return prop.select?.name || '';
-      case 'multi_select':
-        return Array.isArray(prop.multi_select) ? prop.multi_select.map((s) => s?.name).filter(Boolean).join(', ') : '';
-      case 'status':
-        return prop.status?.name || '';
-      case 'date':
-        if (!prop.date) return '';
-        return prop.date.end ? `${prop.date.start} → ${prop.date.end}` : prop.date.start;
-      case 'checkbox':
-        return prop.checkbox ? 'true' : 'false';
-      case 'url':
-        return prop.url || '';
-      case 'email':
-        return prop.email || '';
-      case 'phone_number':
-        return prop.phone_number || '';
-      case 'people':
-        return Array.isArray(prop.people) ? prop.people.map(formatUser).filter(Boolean).join(', ') : '';
-      case 'created_time':
-        return prop.created_time || '';
-      case 'last_edited_time':
-        return prop.last_edited_time || '';
-      case 'created_by':
-        return formatUser(prop.created_by);
-      case 'last_edited_by':
-        return formatUser(prop.last_edited_by);
-      case 'files': {
-        if (!Array.isArray(prop.files) || prop.files.length === 0) return '';
-        return prop.files
-          .map((f) => f?.name || f?.file?.url || f?.external?.url)
-          .filter(Boolean)
-          .join(', ');
-      }
-      case 'relation':
-        // Relation values are usually opaque IDs; include a hint for LLM readability.
-        return Array.isArray(prop.relation)
-          ? prop.relation
-            .map((r) => r?.id)
-            .filter(Boolean)
-            .map((id) => `${id} (relation)`)
-            .join(', ')
-          : '';
-      case 'formula': {
-        const f = prop.formula;
-        if (!f) return '';
-        if (f.type === 'string') return f.string || '';
-        if (f.type === 'number') return f.number === null || f.number === undefined ? '' : String(f.number);
-        if (f.type === 'boolean') return f.boolean ? 'true' : 'false';
-        if (f.type === 'date') return f.date?.start || '';
-        return '';
-      }
-      case 'rollup': {
-        const r = prop.rollup;
-        if (!r) return '';
-        if (r.type === 'number') return r.number === null || r.number === undefined ? '' : String(r.number);
-        if (r.type === 'date') return r.date?.start || '';
-        if (r.type === 'array') return Array.isArray(r.array) ? r.array.map((it) => pagePropertyToText(it)).filter(Boolean).join(', ') : '';
-        return '';
-      }
-      default:
-        return '';
+
+    function _formatFiles(propFiles) {
+      if (!Array.isArray(propFiles) || propFiles.length === 0) return '';
+      return propFiles
+        .map((f) => f?.name || f?.file?.url || f?.external?.url)
+        .filter(Boolean)
+        .join(', ');
     }
+
+    function _formatRelation(propRel) {
+      if (!Array.isArray(propRel)) return '';
+      return propRel
+        .map((r) => r?.id)
+        .filter(Boolean)
+        .map((id) => `${id} (relation)`)
+        .join(', ');
+    }
+
+    function _formatFormula(f) {
+      if (!f) return '';
+      const handlers = {
+        string: (v) => v.string || '',
+        number: (v) => (v.number === null || v.number === undefined ? '' : String(v.number)),
+        boolean: (v) => (v.boolean ? 'true' : 'false'),
+        date: (v) => v.date?.start || '',
+      };
+      const fn = handlers[f.type];
+      return typeof fn === 'function' ? fn(f) : '';
+    }
+
+    function _formatRollup(r) {
+      if (!r) return '';
+      if (r.type === 'number') return r.number === null || r.number === undefined ? '' : String(r.number);
+      if (r.type === 'date') return r.date?.start || '';
+      if (r.type === 'array') return Array.isArray(r.array) ? r.array.map((it) => pagePropertyToText(it)).filter(Boolean).join(', ') : '';
+      return '';
+    }
+
+    function _formatPeople(propPeople) {
+      return Array.isArray(propPeople) ? propPeople.map(formatUser).filter(Boolean).join(', ') : '';
+    }
+
+    const handlers = {
+      title: (p) => notionRichTextToPlain(p.title),
+      rich_text: (p) => notionRichTextToPlain(p.rich_text),
+      number: (p) => (p.number === null || p.number === undefined ? '' : String(p.number)),
+      select: (p) => p.select?.name || '',
+      multi_select: (p) => (Array.isArray(p.multi_select) ? p.multi_select.map((s) => s?.name).filter(Boolean).join(', ') : ''),
+      status: (p) => p.status?.name || '',
+      date: (p) => { if (!p.date) return ''; return p.date.end ? `${p.date.start} → ${p.date.end}` : p.date.start; },
+      checkbox: (p) => (p.checkbox ? 'true' : 'false'),
+      url: (p) => p.url || '',
+      email: (p) => p.email || '',
+      phone_number: (p) => p.phone_number || '',
+      people: (p) => _formatPeople(p.people),
+      created_time: (p) => p.created_time || '',
+      last_edited_time: (p) => p.last_edited_time || '',
+      created_by: (p) => formatUser(p.created_by),
+      last_edited_by: (p) => formatUser(p.last_edited_by),
+      files: (p) => _formatFiles(p.files),
+      relation: (p) => _formatRelation(p.relation),
+      formula: (p) => _formatFormula(p.formula),
+      rollup: (p) => _formatRollup(p.rollup),
+    };
+
+    const fn = handlers[prop.type];
+    return typeof fn === 'function' ? fn(prop) : '';
   } catch {
     return '';
   }
@@ -173,31 +225,8 @@ async function convertToCSV(rows, orderedProperties, notion) {
     }
   }
 
-  const relationTitleCache = new Map();
-  if (relationIds.size > 0) {
-    const ids = Array.from(relationIds);
-    const CONC = 6;
-    for (let i = 0; i < ids.length; i += CONC) {
-      const batch = ids.slice(i, i + CONC);
-      await Promise.all(batch.map(async (rid) => {
-        try {
-          const relPage = await notion.getPage(rid);
-          const relTitle = extractTitle(relPage) || rid;
-          relationTitleCache.set(rid, relTitle);
-        } catch {
-          relationTitleCache.set(rid, rid);
-        }
-      }));
-    }
-  }
-
-  function escapeCell(val) {
-    if (val === null || val === undefined) return '';
-    const s = String(val);
-    const mustQuote = /[",\n]/.test(s);
-    const escaped = s.replace(/"/g, '""');
-    return mustQuote ? `"${escaped}"` : escaped;
-  }
+  const relationTitleCache = await prefetchRelationTitles(relationIds, notion);
+  const escapeCell = escapeCsvCell;
 
   const headers = orderedProperties.map(([key, schema]) => schema?.name || key);
   const lines = [];
@@ -280,23 +309,7 @@ async function childDatabaseToMarkdownTable(block, ctx, titleForErrors, { includ
     }
   }
 
-  const relationTitleCache = new Map();
-  if (relationIds.size > 0) {
-    const ids = Array.from(relationIds);
-    const CONC = 6;
-    for (let i = 0; i < ids.length; i += CONC) {
-      const batch = ids.slice(i, i + CONC);
-      await Promise.all(batch.map(async (rid) => {
-        try {
-          const relPage = await notion.getPage(rid);
-          const relTitle = extractTitle(relPage) || rid;
-          relationTitleCache.set(rid, relTitle);
-        } catch {
-          relationTitleCache.set(rid, rid);
-        }
-      }));
-    }
-  }
+  const relationTitleCache = await prefetchRelationTitles(relationIds, notion);
 
   // Helper to convert property to text, with relation resolution
   function propToText(prop) {
@@ -396,7 +409,9 @@ async function convertBlockParts(markdownParts, n2m, titleForErrors, stats, onEr
       converted.push(part);
     } else {
       try {
-        const mdBlocks = await n2m.blocksToMarkdown(part.blocks);
+        // Inject sequence numbers to prevent fallback to bullet items
+        const annotatedBlocks = prepareNumberedLists(part.blocks);
+        const mdBlocks = await n2m.blocksToMarkdown(annotatedBlocks);
         const mdResult = n2m.toMarkdownString(mdBlocks);
         converted.push({ type: 'blocks', content: normalizeSpacing(mdResult.parent || '') });
       } catch (err) {
@@ -1148,23 +1163,6 @@ async function processAssets(markdown, pageDir, stats, ctx) {
 }
 
 /**
- * Check if a URL is safe to fetch (not a private/internal address).
- */
-function isAllowedUrl(url) {
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname;
-
-    if (BLOCKED_HOSTNAMES.has(hostname)) return false;
-    if (PRIVATE_IP_PREFIXES.some((prefix) => hostname.startsWith(prefix))) return false;
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Run async tasks with bounded concurrency.
  */
 async function runWithConcurrency(items, limit, fn) {
@@ -1207,69 +1205,18 @@ async function downloadFile(url, destPath, { parentSignal } = {}) {
 
   const timeoutId = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
 
-  let response;
-  let reader = null;
-
   try {
-    response = await fetch(url, { signal: controller.signal });
+    if (!isAllowedUrl(url)) {
+      throw new Error('Disallowed URL');
+    }
+    await downloadToPath(url, destPath, { parentSignal: controller.signal, retries: 2, backoff: 150, timeoutMs: DOWNLOAD_TIMEOUT_MS, maxSize: MAX_ASSET_SIZE });
   } catch (err) {
-    clearTimeout(timeoutId);
-    throw err;
-  }
-
-  try {
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    // Early reject if Content-Length is known and too large
-    const rawLength = response.headers.get('content-length');
-    const contentLength = rawLength ? parseInt(rawLength, 10) : NaN;
-    if (!Number.isNaN(contentLength) && contentLength > MAX_ASSET_SIZE) {
-      throw new Error(`File too large (${Math.round(contentLength / 1024 / 1024)}MB, limit ${MAX_ASSET_SIZE / 1024 / 1024}MB)`);
-    }
-
-    // Stream and count bytes to enforce limit even without Content-Length
-    reader = response.body && typeof response.body.getReader === 'function' ? response.body.getReader() : null;
-    const chunks = [];
-    let totalBytes = 0;
-
-    if (!reader) throw new Error('No response body');
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      totalBytes += (value && value.length) || (value && value.byteLength) || 0;
-      if (totalBytes > MAX_ASSET_SIZE) {
-        // Try to cancel the reader and abort the request to ensure sockets are closed
-        try { await reader.cancel(); } catch (err) {}
-        try { controller.abort(); } catch (err) {}
-        throw new Error(`File too large (exceeded ${MAX_ASSET_SIZE / 1024 / 1024}MB during download)`);
-      }
-      chunks.push(value);
-    }
-
-    await writeFile(destPath, Buffer.concat(chunks));
+    throw wrapError(`Failed to download ${url} — ${err && err.message ? err.message : String(err)}`, err);
   } finally {
     clearTimeout(timeoutId);
     if (parentSignal && parentListener) {
       try { parentSignal.removeEventListener('abort', parentListener); } catch (e) {}
     }
-    // Best-effort cleanup: cancel/release reader and destroy underlying body if present
-    try {
-      if (reader) {
-        try { await reader.cancel(); } catch (err) {}
-        try { if (typeof reader.releaseLock === 'function') reader.releaseLock(); } catch (err) {}
-      }
-    } catch (err) {}
-
-    try {
-      if (response && response.body) {
-        if (typeof response.body.cancel === 'function') {
-          try { await response.body.cancel(); } catch (err) {}
-        } else if (typeof response.body.destroy === 'function') {
-          try { response.body.destroy(); } catch (err) {}
-        }
-      }
-    } catch (err) {}
   }
 }
 

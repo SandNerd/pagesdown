@@ -10,3 +10,5 @@ rigour-fix-packet.json
 .rigour/
 *.code-workspace
 repomix-output.xml
+/.vscode
+/.rigour

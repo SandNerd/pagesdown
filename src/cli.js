@@ -218,7 +218,38 @@ export function extractNotionId(input) {
 const BANNER = `Notion Drive`;
 
 export function parseArgs(argv) {
-  const out = { source: null, out: null, help: false, token: null, sourceClip: false, debug: false, type: 'markdown', format: null, sync: null, syncMode: false, syncFilter: null, groupFilter: null, noCache: false, watchMode: false, statusMode: false, statusFilter: null, onlyStatus: null, excludeDisabled: false, sinceDays: null, jsonOutput: false, force: false };
+  const out = {
+    source: null,
+    out: null,
+    help: false,
+    token: null,
+    sourceClip: false,
+    debug: false,
+    type: 'markdown',
+    format: null,
+    sync: null,
+    syncMode: false,
+    syncFilter: null,
+    groupFilter: null,
+    noCache: false,
+    watchMode: false,
+    statusMode: false,
+    statusFilter: null,
+    onlyStatus: null,
+    excludeDisabled: false,
+    sinceDays: null,
+    jsonOutput: false,
+    force: false,
+
+    pushMode: false,
+    pullMode: false,
+    file: null,
+    page: null,
+    useCache: false,
+    filename: null,
+    frontmatter: null,
+    title: null,
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -230,6 +261,10 @@ export function parseArgs(argv) {
         out.syncFilter = next;
         i += 1;
       }
+    } else if (a === 'push') {
+      out.pushMode = true;
+    } else if (a === 'pull') {
+      out.pullMode = true;
     } else if (a === '--source' || a === '-s') {
       const raw = argv[i + 1];
       out.source = raw === '-' ? '-' : extractNotionId(raw);
@@ -285,6 +320,24 @@ export function parseArgs(argv) {
       out.jsonOutput = true;
     } else if (a === '--no-cache') {
       out.noCache = true;
+    } else if (a === '--use-cache') {
+      out.useCache = true;
+    } else if (a === '--file') {
+      out.file = argv[i + 1];
+      i += 1;
+    } else if (a === '--page') {
+      const raw = argv[i + 1];
+      out.page = raw === '-' ? '-' : extractNotionId(raw);
+      i += 1;
+    } else if (a === '--filename') {
+      out.filename = argv[i + 1];
+      i += 1;
+    } else if (a === '--frontmatter') {
+      out.frontmatter = argv[i + 1];
+      i += 1;
+    } else if (a === '--title') {
+      out.title = argv[i + 1];
+      i += 1;
     } else if (a === '--force' || a === '-f') {
       out.force = true;
     } else if (a === '--watch' || a === '-w') {
@@ -293,6 +346,52 @@ export function parseArgs(argv) {
   }
 
   return out;
+}
+
+function parseFrontmatterFlag(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return value;
+  const v = value.trim();
+  if (!v) return null;
+  if (v.toLowerCase() === 'true') return true;
+  if (v.toLowerCase() === 'false') return false;
+  return v;
+}
+
+export function createPushOverrideManifest({ filePath, page, frontmatter, title, format }) {
+  const absFilePath = path.resolve(filePath);
+  const outDir = path.dirname(absFilePath);
+  const baseName = path.basename(absFilePath);
+  return {
+    targets: [
+      {
+        source: String(page),
+        outDir,
+        filename: baseName,
+        sync: 'push-only',
+        frontmatter: frontmatter === null ? undefined : parseFrontmatterFlag(frontmatter),
+        title: title === null ? undefined : title,
+        format: format || undefined,
+      },
+    ],
+  };
+}
+
+export function createPullOverrideManifest({ page, outDir, filename, frontmatter, title, format }) {
+  const absOutDir = path.resolve(outDir);
+  return {
+    targets: [
+      {
+        source: String(page),
+        outDir: absOutDir,
+        filename: filename || undefined,
+        sync: 'pull-only',
+        frontmatter: frontmatter === null ? undefined : parseFrontmatterFlag(frontmatter),
+        title: title === null ? undefined : title,
+        format: format || undefined,
+      },
+    ],
+  };
 }
 
 /**
@@ -369,12 +468,16 @@ export async function main(envToken = null) {
       '                          notiondrive sync sys-design       # run targets named or grouped sys-design',
       '                          notiondrive sync -g docs          # run targets with group: "docs"',
       '                          notiondrive sync --watch          # start watching for file changes',
+      '                          notiondrive push  --file ./Draft.md --page <pageIdOrUrl>',
+      '                          notiondrive pull  --page <pageIdOrUrl> --out ./exports',
+      '  push                  Upload a local Markdown file to a specific Notion page',
+      '  pull                  Download a specific Notion page to a local folder',
       '',
       'Options:',
       '  -s, --source <id-or-url>  Specify an explicit Notion Page/Database UUID or full Share Link',
       '                       Use "-" to read the source id/url from stdin (pipe/echo)',
       '                       Use "--source-clip" to read the URL from the clipboard (macOS pbpaste)',
-      '  -o, --out <path>      Specify a custom local directory output path (default: current directory)',
+      '  -o, --out <path>      Specify a custom local directory output path (default: current directory; also used by `pull`)',
       '  -d, --debug           Enable verbose debug logging (helpful for troubleshooting)',
       '      --set-default-out <path>  Set and save the global default output directory and exit',
       '  -t, --token <token>     Set and save a Notion integration token',
@@ -389,6 +492,16 @@ export async function main(envToken = null) {
         '      --since <days>                 Show only targets changed within the last N days (remote or local)',
         '      --json                         Emit JSON output (for scripts)',
       '  -w, --watch           Enter watch mode: automatically push local file changes to Notion (requires sync mode)',
+
+      'Push/pull flags:',
+      '  push:  --file <local.md>  Local Markdown file to upload (required for `push`)',
+      '         --page <id-or-url> Notion page/database UUID or full share URL (required for `push`)',
+      '  pull:  --page <id-or-url> Notion page/database UUID or full share URL (required for `pull`)',
+      '         --filename <name.md> Optional output filename (required filename only when `out` is a directory)',
+      '  --frontmatter <key|true>  Enable YAML frontmatter handling (pull: generate file frontmatter; push: map into a Notion property)',
+      '  --title <value>           Override how the page title is derived (for push/pull)',
+      '  --use-cache               Allow cache usage for `push` overrides (default: skip cache for deterministic overrides)',
+
       '  -h, --help            Show this help information',
     ].join('\n'))
     process.exit(0);
@@ -396,8 +509,8 @@ export async function main(envToken = null) {
   
   // Enable debug mode early so other modules can check env var
   if (args.debug) {
-    process.env.NOTIONDRIVE_DEBUG = '1';
-    p.log.info('Debug logging enabled (NOTIONDRIVE_DEBUG=1)');
+    process.env.DEBUG = '1';
+    p.log.info('Debug logging enabled (DEBUG=1)');
   }
   // If the user asked to read the source id/url from stdin (pipe/echo), do that now.
   if (args.source === '-') {
@@ -501,6 +614,68 @@ export async function main(envToken = null) {
   if (!token && envToken) {
     token = envToken;
     p.log.info('Using token from NOTION_TOKEN environment variable');
+  }
+
+  // ── Push/pull overrides ───────────────────────────────
+  // These commands intentionally bypass manifest resolution and instead
+  // build a one-off manifest target from CLI flags.
+  if (args.pushMode || args.pullMode) {
+    if (args.pushMode) {
+      if (!args.file || !args.page) {
+        p.log.error('Usage: notiondrive push --file <local.md> --page <pageIdOrUrl> [--frontmatter <key|true>] [--title <value>] [--format <markdown-tree|flattened|csv>] [--use-cache] [--force]');
+        process.exit(1);
+      }
+    }
+    if (args.pullMode) {
+      if (!args.page || !args.out) {
+        p.log.error('Usage: notiondrive pull --page <pageIdOrUrl> --out <dir> [--filename <name.md>] [--frontmatter <key|true>] [--title <value>] [--format <markdown-tree|flattened|csv>] [--force]');
+        process.exit(1);
+      }
+    }
+
+    if (!token) {
+      p.log.error('No Notion token found. Set NOTION_TOKEN or save a token with the CLI (notiondrive --token <token>).');
+      process.exit(1);
+    }
+
+    let validated;
+    try {
+      validated = new NotionClient(token);
+      await validated.validateToken();
+    } catch (err) {
+      p.log.error(
+        err?.status === 401
+          ? 'Invalid token. Make sure you copied the "Internal Integration Secret", not the Integration ID.'
+          : 'Could not connect to Notion. Check your internet connection and try again.'
+      );
+      process.exit(1);
+    }
+
+    const oneOffManifest = args.pushMode
+      ? createPushOverrideManifest({
+          filePath: args.file,
+          page: args.page,
+          frontmatter: args.frontmatter,
+          title: args.title,
+          format: args.format || undefined,
+        })
+      : createPullOverrideManifest({
+          page: args.page,
+          outDir: args.out,
+          filename: args.filename,
+          frontmatter: args.frontmatter,
+          title: args.title,
+          format: args.format || undefined,
+        });
+
+    const engineArgs = {
+      debug: args.debug,
+      force: args.force,
+      noCache: args.pushMode ? !args.useCache : true,
+    };
+
+    const syncResult = await executeSyncMode(oneOffManifest, token, engineArgs);
+    process.exit(syncResult && syncResult.failedTargets && syncResult.failedTargets.length > 0 ? 1 : 0);
   }
 
   // ── Sync mode: batch download from manifest ───────────────────────

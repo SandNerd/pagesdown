@@ -356,6 +356,54 @@ test('push uploads inject frontmatter into configured database property and stri
   }
 });
 
+test('push uploads injects only matching YAML key value into property', async () => {
+  const originalCwd = process.cwd();
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-frontmatter-inject-key-test-'));
+  try {
+    process.chdir(dir);
+
+    const pageId = 'cccccccccccccccccccccccccccccccc';
+    const rel = 'issue-ops.md';
+    const mdPath = path.join(dir, rel);
+    const source = `---\ndescription: "Only this should land in Description"\nmode: tasking\n---\n\n# Title\n\nBody`;
+    await writeFile(mdPath, source, 'utf8');
+
+    const ledger = {
+      byNotionId: { [pageId]: { notion_id: pageId, outputs: { [rel]: { last_synced_remote_mtime: '2026-01-01T00:00:00.000Z', last_synced_local_hash: 'older-hash' } } } },
+      byPath: { [rel]: pageId },
+    };
+
+    const appendCalls = [];
+    const updateCalls = [];
+    class MockNotion {
+      constructor() {
+        this.client = { pages: { update: async (payload) => { updateCalls.push(payload); } } };
+      }
+      async validateToken() {}
+      async getPage(id) {
+        return { id, last_edited_time: '2026-01-01T00:00:00.000Z' };
+      }
+      async clearPageContent() { return 0; }
+      async appendPageContent(_pageId, blocks) { appendCalls.push(blocks); return blocks.length; }
+    }
+
+    const manifest = { targets: [{ source: `https://notion.so/${pageId}`, outDir: '.', filename: rel, sync: 'push-only', frontmatter: 'Description' }] };
+    await executeSyncMode(manifest, 'fake-token', { debug: false }, { notionClass: MockNotion, prompts: createNoopPrompts(), loadStateLedger: () => ledger, saveStateLedger: async () => {} });
+
+    const descriptionUpdate = updateCalls.find((p) => p.properties && p.properties.Description);
+    assert.ok(descriptionUpdate, 'Expected property update for Description');
+    const rich = descriptionUpdate.properties.Description.rich_text || [];
+    const injected = rich.map((c) => c?.text?.content || '').join('');
+    assert.equal(injected.includes('description:'), false, 'Should not inject YAML key name');
+    assert.equal(injected.includes('mode:'), false, 'Should not inject other YAML keys');
+    assert.equal(injected.includes('Only this should land in Description'), true);
+    assert.equal(JSON.stringify(appendCalls[0]).includes('description:'), false, 'frontmatter should not be present in uploaded blocks');
+  } finally {
+    process.chdir(originalCwd);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('two-way sync pushes to Notion and returns completedTargets', async () => {
   const outDir = await mkdtemp(path.join(tmpdir(), 'notiondrive-two-way-test-'));
 
@@ -758,6 +806,112 @@ test('pushing markdown with H1 at the top updates Notion title and strips H1 fro
   }
 });
 
+test('title: filename does not demote frontmatter-derived value into body', async () => {
+  const originalCwd = process.cwd();
+  const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-title-frontmatter-demote-test-'));
+  try {
+    process.chdir(dir);
+
+    const pageId = 'dddddddddddddddddddddddddddddddd';
+    const rel = 'optimize-github-actions.md';
+    const yamlValue = 'audit and optimize GitHub Actions workflows to lower runner costs';
+    const sourceMd = `---\ndescription: ${yamlValue}\n---\n\n# Body\n\nContent`;
+    const mdPath = path.join(dir, rel);
+    await writeFile(mdPath, sourceMd, 'utf8');
+
+    const ledger = {
+      byNotionId: {
+        [pageId]: {
+          notion_id: pageId,
+          outputs: {
+            [rel]: { last_synced_remote_mtime: '2026-01-01T00:00:00.000Z', last_synced_local_hash: 'older-hash' },
+          },
+        },
+      },
+      byPath: { [rel]: pageId },
+    };
+
+    const appendCalls = [];
+    const updateCalls = [];
+
+    let firstGetPage = true;
+    class MockNotion {
+      constructor() {
+        this.client = { pages: { update: async (payload) => updateCalls.push(payload) } };
+      }
+      async validateToken() {}
+      async getPage() {
+        // Simulate an old cloud title that equals the frontmatter-derived value.
+        // With title: "filename", code would normally demote the old title into
+        // the page body. This test asserts we avoid that behavior.
+        if (firstGetPage) {
+          firstGetPage = false;
+          return {
+            id: pageId,
+            last_edited_time: '2026-01-01T00:00:00.000Z',
+            properties: {
+              title: { type: 'title', title: [{ plain_text: yamlValue }] },
+              Description: { type: 'rich_text', rich_text: [] },
+            },
+          };
+        }
+
+        return {
+          id: pageId,
+          last_edited_time: '2026-01-01T00:00:00.000Z',
+          properties: {
+            title: { type: 'title', title: [{ plain_text: rel }] },
+            Description: { type: 'rich_text', rich_text: [] },
+          },
+        };
+      }
+      async getBlockChildren() {
+        return [];
+      }
+      async clearPageContent() {}
+      async appendPageContent(_pageId, blocks) {
+        appendCalls.push(blocks);
+        return blocks.length;
+      }
+    }
+
+    const manifest = {
+      targets: [
+        {
+          source: `https://notion.so/${pageId}`,
+          outDir: '.',
+          filename: rel,
+          sync: 'push-only',
+          frontmatter: 'Description',
+          title: 'filename',
+        },
+      ],
+    };
+
+    const result = await executeSyncMode(manifest, 'fake-token', { debug: false, noCache: false }, {
+      notionClass: MockNotion,
+      prompts: createNoopPrompts(),
+      loadStateLedger: () => ledger,
+      saveStateLedger: async () => {},
+    });
+
+    assert.ok(result.completedTargets.some((t) => t.pushed === true), 'should push the updated file');
+    assert.ok(appendCalls.length >= 1, 'should append blocks at least once');
+
+    // appendPageContent can be invoked once during title alignment (demotion)
+    // and once during the actual body upload. Validate the final append
+    // payload only.
+    const appendedStr = JSON.stringify(appendCalls[appendCalls.length - 1] || []);
+    // Old cloud title value should not be inserted as a demotion H1.
+    assert.equal(appendedStr.includes(yamlValue), false, 'should not demote frontmatter-derived value into body blocks');
+    // Frontmatter itself is not in blocks either.
+    assert.equal(appendedStr.includes('description:'), false, 'frontmatter should not be present in uploaded blocks');
+  } finally {
+    process.chdir(originalCwd);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('H1 extraction works correctly with frontmatter: true', async () => {
   const originalCwd = process.cwd();
   const dir = await mkdtemp(path.join(tmpdir(), 'notiondrive-h1-fm-test-'));
@@ -803,8 +957,9 @@ test('H1 extraction works correctly with frontmatter: true', async () => {
     assert.equal(updatedTitle, 'Metadata Title');
     const h1Block = bodyBlocks.find(b => b.type === 'heading_1');
     assert.ok(!h1Block, 'H1 block should have been removed from body');
-    // Ensure the frontmatter blocks are still there (Divider, Paragraph, Divider)
-    assert.ok(bodyBlocks.length >= 3, 'Expected frontmatter blocks to be preserved');
+    // With the new rule, frontmatter should never appear in the pushed body.
+    assert.equal(bodyBlocks.length, 1);
+    assert.equal(bodyBlocks[0].type, 'paragraph');
   } finally {
     process.chdir(originalCwd);
     await rm(dir, { recursive: true, force: true });

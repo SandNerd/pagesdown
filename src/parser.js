@@ -33,60 +33,125 @@ function getCodeLanguage(filename) {
   return SCRIPT_LANGUAGE_BY_EXTENSION[ext] || null;
 }
 
+const NOTION_RICH_TEXT_MAX = 2000;
+
+function isValidHttpUrl(str) {
+  try {
+    const u = new URL(str);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch (e) {
+    return false;
+  }
+}
+
+function splitIntoChunksPreservingLines(text, maxLen = NOTION_RICH_TEXT_MAX) {
+  if (!text || text.length <= maxLen) return [text];
+  const lines = text.split('\n');
+  const chunks = [];
+  let current = '';
+
+  for (const line of lines) {
+    const next = current ? current + '\n' + line : line;
+    if (next.length > maxLen) {
+      if (current) {
+        chunks.push(current);
+        current = line;
+        if (current.length > maxLen) {
+          let start = 0;
+          while (start < current.length) {
+            chunks.push(current.slice(start, start + maxLen));
+            start += maxLen;
+          }
+          current = '';
+        }
+      } else {
+        let start = 0;
+        while (start < line.length) {
+          chunks.push(line.slice(start, start + maxLen));
+          start += maxLen;
+        }
+        current = '';
+      }
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function makeTextObjects(content, annotations = {}, link = null) {
+  if (content === undefined || content === null) return [];
+  const chunks = splitIntoChunksPreservingLines(String(content));
+  const objs = [];
+  for (const chunk of chunks) {
+    if (chunk === '') continue;
+    const obj = {
+      type: 'text',
+      text: {
+        content: chunk,
+        link: link ? { url: link } : null,
+      },
+    };
+    if (annotations && Object.keys(annotations).length) obj.annotations = annotations;
+    objs.push(obj);
+  }
+  return objs;
+}
+
 function parseMarkdownToRichText(text) {
   if (!text) return [];
 
-  // Tokenize bold formatting (**text**), inline code highlights (`text`), and markdown hyperlinks ([text](url))
+  // Tokenize bold (**text**), inline code (`text`), and markdown links ([text](url))
   const tokenRegex = /(\*\*.*?\*\*|`.*?`|\[.*?\]\(.*?\))/g;
   const parts = text.split(tokenRegex);
+  const result = [];
 
-  return parts
-    .map((part) => {
-      if (part.startsWith('**') && part.endsWith('**')) {
-        return {
-          type: 'text',
-          text: { content: part.slice(2, -2) },
-          annotations: { bold: true },
-        };
-      }
-      if (part.startsWith('`') && part.endsWith('`')) {
-        return {
-          type: 'text',
-          text: { content: part.slice(1, -1) },
-          annotations: { code: true },
-        };
-      }
-      if (part.startsWith('[') && part.includes('](')) {
-        const match = part.match(/\[(.*?)\]\((.*?)\)/);
-        if (match) {
-          return {
-            type: 'text',
-            text: { content: match[1], link: { url: match[2] } },
-          };
+  for (const part of parts) {
+    if (!part) continue;
+
+    if (part.startsWith('**') && part.endsWith('**')) {
+      const content = part.slice(2, -2);
+      result.push(...makeTextObjects(content, { bold: true }, null));
+      continue;
+    }
+
+    if (part.startsWith('`') && part.endsWith('`')) {
+      const content = part.slice(1, -1);
+      result.push(...makeTextObjects(content, { code: true }, null));
+      continue;
+    }
+
+    if (part.startsWith('[') && part.includes('](')) {
+      const match = part.match(/\[(.*?)\]\((.*?)\)/);
+      if (match) {
+        const label = match[1];
+        const url = match[2];
+        const sanitized = isValidHttpUrl(url) ? url : null;
+        if (sanitized) {
+          result.push(...makeTextObjects(label, {}, sanitized));
+        } else {
+          // If URL isn't valid for Notion, keep the label as plain text and include the raw URL in parentheses.
+          result.push(...makeTextObjects(`${label} (${url})`, {}, null));
         }
+        continue;
       }
-      return {
-        type: 'text',
-        text: { content: part },
-      };
-    })
-    .filter((p) => p.text.content !== '');
+    }
+
+    result.push(...makeTextObjects(part, {}, null));
+  }
+
+  return result.filter((p) => p && p.text && p.text.content !== '');
 }
 
 function createCodeBlock(codeText, language) {
+  const rich_text = makeTextObjects(codeText, {}, null);
   return {
     object: 'block',
     type: 'code',
     code: {
-      rich_text: [
-        {
-          type: 'text',
-          text: {
-            content: codeText,
-            link: null,
-          },
-        },
-      ],
+      rich_text,
       language,
       caption: [],
     },
@@ -316,23 +381,7 @@ export function markdownToNotionBlocks(markdownText, filename) {
 
       const codeText = codeLines.join('\n').trimEnd();
       if (codeText) {
-        blocks.push({
-          object: 'block',
-          type: 'code',
-          code: {
-            rich_text: [
-              {
-                type: 'text',
-                text: {
-                  content: codeText,
-                  link: null,
-                },
-              },
-            ],
-            language,
-            caption: [],
-          },
-        });
+        blocks.push(createCodeBlock(codeText, language));
       }
       continue;
     }

@@ -39,7 +39,21 @@ function flattenManifest(data) {
       if (Array.isArray(groupTargets)) {
         for (const target of groupTargets) {
           if (!target || typeof target !== 'object') continue;
-          flatTargets.push(Object.assign({ group: groupName || groupDefaults.group }, groupDefaults, target));
+
+          let resolvedPath = target.path;
+          if (!resolvedPath && target.relativePath && groupDefaults.path) {
+            // Combine group path and target relativePath cleanly
+            resolvedPath = path.join(groupDefaults.path, target.relativePath);
+          }
+
+          // Include the resolved path in the flattened target object if computed
+          const flattenedTarget = Object.assign(
+            { group: groupName || groupDefaults.group },
+            groupDefaults,
+            target,
+            resolvedPath ? { path: resolvedPath } : {}
+          );
+          flatTargets.push(flattenedTarget);
         }
       }
     }

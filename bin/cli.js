@@ -13,7 +13,10 @@ if (major < 20 || (major === 20 && minor < 12)) {
 
 // Launch the CLI
 const _envKey = ['NOTION', 'TOKEN'].join('_');
-import('../src/cli.js').then(({ main }) => main(process.env[_envKey] || null)).catch((err) => {
-  console.error(err?.stack || err?.message || String(err));
-  process.exit(1);
-});
+
+async function run() {
+  const mod = await import('../src/cli.js');
+  await mod.main(process.env[_envKey] || null);
+}
+
+run();

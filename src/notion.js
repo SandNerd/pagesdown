@@ -18,23 +18,30 @@ export class NotionClient {
    * Uses a promise chain to ensure mutual exclusion (no concurrent requests).
    */
   _throttledCall(fn) {
-    // Safety: reject early if queue is already above the safety cap.
     if (this._pending > this._maxPending) {
       return Promise.reject(new Error('Notion request queue overloaded'));
     }
     this._pending++;
-    this._queue = this._queue.catch(() => {}).then(async () => {
-      let timer;
-      try {
-        // Store the timer id so analysis tools can detect and reason about it.
-        await new Promise((r) => { timer = setTimeout(r, this._minInterval); });
-        return await fn();
-      } finally {
-        try { clearTimeout(timer); } catch (err) {}
-        this._pending--;
-      }
+    const previousQueue = this._queue;
+    // Schedule this slot's delay relative to the previous request's dispatch time
+    let timerId;
+    const executionSlot = previousQueue.catch(() => {}).then(() => {
+      return new Promise((resolve) => {
+        // store timer id so static analysis tools can reason about lifecycle
+        timerId = setTimeout(resolve, this._minInterval);
+      });
     });
-    return this._queue;
+    // Advance the queue tracking pointer immediately to let the next request schedule its delay
+    // Attach a catch to the queue pointer to avoid unhandled rejections from the queue chain
+    this._queue = executionSlot.catch(() => {});
+    // Execute the network function independently when its slot arrives
+    const exec = executionSlot.then(() => fn());
+    return exec.finally(() => {
+      try {
+        if (typeof timerId !== 'undefined') clearTimeout(timerId);
+      } catch (e) {}
+      this._pending--;
+    });
   }
 
   /**
@@ -201,10 +208,9 @@ export class NotionClient {
    */
   async getBlockChildrenDeep(blockId, depth = 0, warnings = []) {
     const blocks = await this.getBlockChildren(blockId);
-
-    if (depth >= 15) return { blocks, warnings }; // Safety valve for pathological nesting
-
-    for (const block of blocks) {
+    if (depth >= 15) return { blocks, warnings };
+    
+    const tasks = blocks.map(async (block) => {
       if (block.has_children && block.type !== 'child_page' && block.type !== 'child_database') {
         try {
           const result = await this.getBlockChildrenDeep(block.id, depth + 1, warnings);
@@ -214,8 +220,9 @@ export class NotionClient {
           warnings.push({ blockId: block.id, blockType: block.type, error: err.message });
         }
       }
-    }
-
+    });
+    
+    await Promise.all(tasks);
     return { blocks, warnings };
   }
 
@@ -229,26 +236,20 @@ export class NotionClient {
 
     const self = this;
     this._throttledClient = new Proxy(this.client, {
-      get(target, prop) {
-        if (prop === 'blocks') {
-          return new Proxy(target.blocks, {
-            get(blocksTarget, blocksProp) {
-              if (blocksProp === 'children') {
-                return new Proxy(blocksTarget.children, {
-                  get(childrenTarget, childrenProp) {
-                    if (childrenProp === 'list') {
-                      return (args) => self._throttledCall(() => childrenTarget.list(args));
-                    }
-                    return childrenTarget[childrenProp];
-                  },
-                });
-              }
-              return blocksTarget[blocksProp];
-            },
-          });
-        }
-        return target[prop];
-      },
+      get: (target, prop) =>
+        prop === 'blocks'
+          ? new Proxy(target.blocks, {
+              get: (blocksTarget, blocksProp) =>
+                blocksProp === 'children'
+                  ? new Proxy(blocksTarget.children, {
+                      get: (childrenTarget, childrenProp) =>
+                        childrenProp === 'list'
+                          ? (args) => self._throttledCall(() => childrenTarget.list(args))
+                          : childrenTarget[childrenProp],
+                    })
+                  : blocksTarget[blocksProp],
+            })
+          : target[prop],
     });
 
     return this._throttledClient;

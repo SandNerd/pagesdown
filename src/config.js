@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { wrapError } from './error.js';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -6,12 +7,91 @@ const CONFIG_DIR = path.join(os.homedir(), '.notiondrive');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 /**
+ * Remove trailing commas that appear before a closing `}` or `]`.
+ * This scanner avoids touching commas that are inside JSON strings.
+ */
+function removeTrailingCommas(raw) {
+  function isWhitespace(c) {
+    return /\s/.test(c);
+  }
+
+  function nextNonWhitespaceIndex(str, start) {
+    let j = start;
+    while (j < str.length && isWhitespace(str[j])) j++;
+    return j;
+  }
+
+  function readStringEnd(str, start) {
+    // start points to opening quote
+    let i = start + 1;
+    while (i < str.length) {
+      const ch = str[i];
+      if (ch === '\\') {
+        i += 2; // skip escaped char
+        continue;
+      }
+      if (ch === '"') return i + 1;
+      i++;
+    }
+    return i;
+  }
+
+  let out = '';
+  let i = 0;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === '"') {
+      const end = readStringEnd(raw, i);
+      out += raw.slice(i, end);
+      i = end;
+      continue;
+    }
+
+    if (ch === ',') {
+      const j = nextNonWhitespaceIndex(raw, i + 1);
+      const next = raw[j];
+      if (next === '}' || next === ']') {
+        i++;
+        continue; // skip trailing comma
+      }
+    }
+
+    out += ch;
+    i++;
+  }
+
+  return out;
+}
+
+function tolerantJsonParse(text, opts = {}) {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    // Fallback: remove obvious trailing commas and try strict parse
+    try {
+      const cleaned = removeTrailingCommas(text);
+      const parsed = JSON.parse(cleaned);
+      console.warn(
+        'Parsed config after removing trailing commas.',
+        opts.path || 'your config file',
+        '\nRecommendation: add a JSON Schema entry to enable editor validation:',
+        '\n  "$schema": "https://raw.githubusercontent.com/neethanwu/notiondrive/main/schemas/config.schema.json"',
+        '\nor run `npm run validate-config` to check the file.'
+      );
+      return parsed;
+    } catch (err2) {
+      throw err;
+    }
+  }
+}
+
+/**
  * Load saved config. Returns { token, workspace } or null if none/invalid.
  */
 export async function loadConfig() {
   try {
     const data = await readFile(CONFIG_FILE, 'utf-8');
-    const parsed = JSON.parse(data);
+    const parsed = await tolerantJsonParse(data, { path: CONFIG_FILE });
     // Apply manifest flattening so callers can rely on `targets` uniformly
     const flattened = flattenManifest(parsed);
     // Return the parsed config object (may or may not include a token).
@@ -33,7 +113,7 @@ export async function loadProjectConfig() {
   const projectFile = path.resolve(process.cwd(), 'notiondrive.config.json');
   try {
     const data = await readFile(projectFile, 'utf-8');
-    const parsed = JSON.parse(data);
+    const parsed = await tolerantJsonParse(data, { path: projectFile });
     if (parsed && typeof parsed === 'object') {
       return flattenManifest(parsed);
     }
@@ -42,7 +122,7 @@ export async function loadProjectConfig() {
     if (err && err.code === 'ENOENT') {
       return null;
     }
-    throw new Error(`Failed to load ${projectFile}: ${err.message}`);
+    throw wrapError(`Failed to load ${projectFile}`, err);
   }
 }
 
@@ -63,26 +143,34 @@ export function flattenManifest(data) {
   }
 
   // Explode nested group targets and pass down cascading properties
-  if (hadGroups) {
-    for (const group of data.groups) {
+  function _expandGroups(groups) {
+    if (!Array.isArray(groups)) return;
+    for (const group of groups) {
       if (!group || typeof group !== 'object') continue;
-
       const { targets: groupTargets, name: groupName, ...groupDefaults } = group;
+      if (!Array.isArray(groupTargets)) continue;
+      for (const target of groupTargets) {
+        if (!target || typeof target !== 'object') continue;
 
-      if (Array.isArray(groupTargets)) {
-        for (const target of groupTargets) {
-          if (!target || typeof target !== 'object') continue;
-
-          // Combine parameters: target attributes overwrite group defaults
-          flatTargets.push({
-            group: groupName || groupDefaults.group,
-            ...groupDefaults,
-            ...target,
-          });
+        let resolvedPath = target.path;
+        if (!resolvedPath && target.relativePath && groupDefaults.path) {
+          // Combine group path and target relativePath cleanly
+          resolvedPath = path.join(groupDefaults.path, target.relativePath);
         }
+
+        // Include the resolved path in the flattened target object if computed
+        const flattenedTarget = Object.assign(
+          { group: groupName || groupDefaults.group },
+          groupDefaults,
+          target,
+          resolvedPath ? { path: resolvedPath } : {}
+        );
+        flatTargets.push(flattenedTarget);
       }
     }
   }
+
+  if (hadGroups) _expandGroups(data.groups);
 
   // Only assign a `targets` property if the original input had targets/groups
   // or if we built a non-empty flattened list. This avoids adding empty
