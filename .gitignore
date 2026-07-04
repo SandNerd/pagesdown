@@ -3,3 +3,12 @@ docs/
 .env
 .DS_Store
 *.log
+
+# Rigour Artifacts
+rigour-report.json
+rigour-fix-packet.json
+.rigour/
+*.code-workspace
+repomix-output.xml
+/.vscode
+/.rigour

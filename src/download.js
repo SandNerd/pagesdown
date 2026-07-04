@@ -1,12 +1,15 @@
 import { NotionToMarkdown } from 'notion-to-md';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { sanitizeFilename, uniqueFilename, ensureDir } from './utils.js';
-import { extractTitle } from './notion.js';
+import { sanitizeFilename, slugifyFilename, uniqueFilename, ensureDir } from './utils.js';
+import { downloadToPath, isAllowedUrl } from './fetch-stream.js';
+import { wrapError } from './error.js';
+import { extractTitle } from './notion-helpers.js';
 
 const MAX_DEPTH = 20;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 const ASSET_CONCURRENCY = 5;
+const BLOCK_CONCURRENCY = 4;
 const MAX_ASSET_SIZE = 50 * 1024 * 1024; // 50 MB
 
 // Block private/internal IP ranges to prevent SSRF
@@ -14,6 +17,37 @@ const BLOCKED_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '
 const PRIVATE_IP_PREFIXES = ['10.', '192.168.', '169.254.', '172.16.', '172.17.', '172.18.',
   '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.',
   '172.27.', '172.28.', '172.29.', '172.30.', '172.31.'];
+
+async function prefetchRelationTitles(relationIds, notion, concurrency = 6) {
+  const cache = new Map();
+  if (!relationIds || relationIds.size === 0) return cache;
+  const ids = Array.from(relationIds);
+  for (let i = 0; i < ids.length; i += concurrency) {
+    const batch = ids.slice(i, i + concurrency);
+    await Promise.all(batch.map(async (rid) => {
+      try {
+        const relPage = await notion.getPage(rid);
+        const relTitle = extractTitle(relPage) || rid;
+        cache.set(rid, relTitle);
+      } catch {
+        cache.set(rid, rid);
+      }
+    }));
+  }
+  return cache;
+}
+
+function escapeCsvCell(val) {
+  if (val === null || val === undefined) return '';
+  const s = String(val);
+  const mustQuote = /[",\n]/.test(s);
+  const escaped = s.replace(/"/g, '""');
+  return mustQuote ? `"${escaped}"` : escaped;
+}
+
+// Note: fetch/streaming helpers were moved to src/fetch-stream.js and
+// are intentionally not duplicated here to keep streaming lifecycle
+// and error handling in one place for static analysis.
 
 /**
  * Split blocks at child_page/child_database boundaries.
@@ -68,6 +102,28 @@ function normalizeSpacing(md) {
   return md.replace(/\n{3,}/g, '\n\n');
 }
 
+function prepareNumberedLists(blocks) {
+  if (!Array.isArray(blocks)) return blocks;
+
+  function walk(list) {
+    let counter = 0;
+    for (let i = 0; i < list.length; i++) {
+      const block = list[i];
+      if (block && block.type === 'numbered_list_item') {
+        counter = (i > 0 && list[i - 1] && list[i - 1].type === 'numbered_list_item') ? counter + 1 : 1;
+        if (!block.numbered_list_item) block.numbered_list_item = {};
+        block.numbered_list_item.number = counter;
+      } else {
+        counter = 0;
+      }
+      if (block && Array.isArray(block.children)) walk(block.children);
+    }
+  }
+
+  walk(blocks);
+  return blocks;
+}
+
 function escapeTableCell(text) {
   if (text === null || text === undefined) return '';
   return String(text).replace(/\|/g, '\\|').replace(/\n/g, '<br>');
@@ -81,74 +137,132 @@ function notionRichTextToPlain(richText) {
 function pagePropertyToText(prop) {
   if (!prop || typeof prop !== 'object') return '';
   try {
-    switch (prop.type) {
-      case 'title':
-        return notionRichTextToPlain(prop.title);
-      case 'rich_text':
-        return notionRichTextToPlain(prop.rich_text);
-      case 'number':
-        return prop.number === null || prop.number === undefined ? '' : String(prop.number);
-      case 'select':
-        return prop.select?.name || '';
-      case 'multi_select':
-        return Array.isArray(prop.multi_select) ? prop.multi_select.map((s) => s?.name).filter(Boolean).join(', ') : '';
-      case 'status':
-        return prop.status?.name || '';
-      case 'date':
-        if (!prop.date) return '';
-        return prop.date.end ? `${prop.date.start} → ${prop.date.end}` : prop.date.start;
-      case 'checkbox':
-        return prop.checkbox ? 'true' : 'false';
-      case 'url':
-        return prop.url || '';
-      case 'email':
-        return prop.email || '';
-      case 'phone_number':
-        return prop.phone_number || '';
-      case 'people':
-        return Array.isArray(prop.people) ? prop.people.map((p) => p?.name).filter(Boolean).join(', ') : '';
-      case 'files': {
-        if (!Array.isArray(prop.files) || prop.files.length === 0) return '';
-        return prop.files
-          .map((f) => f?.name || f?.file?.url || f?.external?.url)
-          .filter(Boolean)
-          .join(', ');
-      }
-      case 'relation':
-        // Relation values are usually opaque IDs; include a hint for LLM readability.
-        return Array.isArray(prop.relation)
-          ? prop.relation
-            .map((r) => r?.id)
-            .filter(Boolean)
-            .map((id) => `${id} (relation)`)
-            .join(', ')
-          : '';
-      case 'formula': {
-        const f = prop.formula;
-        if (!f) return '';
-        if (f.type === 'string') return f.string || '';
-        if (f.type === 'number') return f.number === null || f.number === undefined ? '' : String(f.number);
-        if (f.type === 'boolean') return f.boolean ? 'true' : 'false';
-        if (f.type === 'date') return f.date?.start || '';
-        return '';
-      }
-      case 'rollup': {
-        const r = prop.rollup;
-        if (!r) return '';
-        if (r.type === 'number') return r.number === null || r.number === undefined ? '' : String(r.number);
-        if (r.type === 'date') return r.date?.start || '';
-        if (r.type === 'array') return Array.isArray(r.array) ? r.array.map((it) => pagePropertyToText(it)).filter(Boolean).join(', ') : '';
-        return '';
-      }
-      default:
-        return '';
+    const formatUser = (user) => user?.name || user?.person?.email || user?.id || '';
+
+    function _formatFiles(propFiles) {
+      if (!Array.isArray(propFiles) || propFiles.length === 0) return '';
+      return propFiles
+        .map((f) => f?.name || f?.file?.url || f?.external?.url)
+        .filter(Boolean)
+        .join(', ');
     }
+
+    function _formatRelation(propRel) {
+      if (!Array.isArray(propRel)) return '';
+      return propRel
+        .map((r) => r?.id)
+        .filter(Boolean)
+        .map((id) => `${id} (relation)`)
+        .join(', ');
+    }
+
+    function _formatFormula(f) {
+      if (!f) return '';
+      const handlers = {
+        string: (v) => v.string || '',
+        number: (v) => (v.number === null || v.number === undefined ? '' : String(v.number)),
+        boolean: (v) => (v.boolean ? 'true' : 'false'),
+        date: (v) => v.date?.start || '',
+      };
+      const fn = handlers[f.type];
+      return typeof fn === 'function' ? fn(f) : '';
+    }
+
+    function _formatRollup(r) {
+      if (!r) return '';
+      if (r.type === 'number') return r.number === null || r.number === undefined ? '' : String(r.number);
+      if (r.type === 'date') return r.date?.start || '';
+      if (r.type === 'array') return Array.isArray(r.array) ? r.array.map((it) => pagePropertyToText(it)).filter(Boolean).join(', ') : '';
+      return '';
+    }
+
+    function _formatPeople(propPeople) {
+      return Array.isArray(propPeople) ? propPeople.map(formatUser).filter(Boolean).join(', ') : '';
+    }
+
+    const handlers = {
+      title: (p) => notionRichTextToPlain(p.title),
+      rich_text: (p) => notionRichTextToPlain(p.rich_text),
+      number: (p) => (p.number === null || p.number === undefined ? '' : String(p.number)),
+      select: (p) => p.select?.name || '',
+      multi_select: (p) => (Array.isArray(p.multi_select) ? p.multi_select.map((s) => s?.name).filter(Boolean).join(', ') : ''),
+      status: (p) => p.status?.name || '',
+      date: (p) => { if (!p.date) return ''; return p.date.end ? `${p.date.start} → ${p.date.end}` : p.date.start; },
+      checkbox: (p) => (p.checkbox ? 'true' : 'false'),
+      url: (p) => p.url || '',
+      email: (p) => p.email || '',
+      phone_number: (p) => p.phone_number || '',
+      people: (p) => _formatPeople(p.people),
+      created_time: (p) => p.created_time || '',
+      last_edited_time: (p) => p.last_edited_time || '',
+      created_by: (p) => formatUser(p.created_by),
+      last_edited_by: (p) => formatUser(p.last_edited_by),
+      files: (p) => _formatFiles(p.files),
+      relation: (p) => _formatRelation(p.relation),
+      formula: (p) => _formatFormula(p.formula),
+      rollup: (p) => _formatRollup(p.rollup),
+    };
+
+    const fn = handlers[prop.type];
+    return typeof fn === 'function' ? fn(prop) : '';
   } catch {
     return '';
   }
 }
 
-async function childDatabaseToMarkdownTable(block, ctx, titleForErrors) {
+/**
+ * Convert database rows to an RFC4180-compliant CSV string.
+ * Resolves relation titles via the Notion client when possible.
+ */
+async function convertToCSV(rows, orderedProperties, notion) {
+  const relationIds = new Set();
+  for (const row of rows) {
+    const pageProps = row?.properties && typeof row.properties === 'object' ? row.properties : {};
+    for (const [, prop] of Object.entries(pageProps)) {
+      if (prop && prop.type === 'relation' && Array.isArray(prop.relation)) {
+        for (const r of prop.relation) if (r?.id) relationIds.add(r.id);
+      }
+    }
+  }
+
+  const relationTitleCache = await prefetchRelationTitles(relationIds, notion);
+  const escapeCell = escapeCsvCell;
+
+  const headers = orderedProperties.map(([key, schema]) => schema?.name || key);
+  const lines = [];
+  lines.push(headers.map(escapeCell).join(','));
+
+  for (const row of rows) {
+    const pageProps = row?.properties && typeof row.properties === 'object' ? row.properties : {};
+    const cells = orderedProperties.map(([key]) => {
+      const prop = pageProps[key];
+      if (prop && prop.type === 'relation' && Array.isArray(prop.relation)) {
+        const titles = prop.relation.map((r) => (r?.id && relationTitleCache.has(r.id) ? relationTitleCache.get(r.id) : r?.id)).filter(Boolean);
+        return escapeCell(titles.join(', '));
+      }
+      return escapeCell(pagePropertyToText(prop));
+    });
+    lines.push(cells.join(','));
+  }
+
+  return lines.join('\r\n') + '\r\n';
+}
+
+// Export internals for unit testing
+export {
+  splitBlocksAtBoundaries,
+  hasExternalImages,
+  normalizeSpacing,
+  escapeTableCell,
+  notionRichTextToPlain,
+  pagePropertyToText,
+  convertToCSV,
+};
+
+// Also export asset helpers for testing
+export { processAssets, downloadFile, getAssetFilename };
+
+async function childDatabaseToMarkdownTable(block, ctx, titleForErrors, { includeHeading = true } = {}) {
   const databaseId = block?.id;
   if (!databaseId) return '';
 
@@ -157,6 +271,7 @@ async function childDatabaseToMarkdownTable(block, ctx, titleForErrors) {
   let db;
   try {
     db = await notion.getDatabase(databaseId);
+    addDependency(ctx, databaseId, 'database', db?.last_edited_time || null);
   } catch (err) {
     stats.errors.push({ title: titleForErrors, error: `Could not retrieve database schema: ${err.message}` });
     onError(`Could not retrieve database schema in ${titleForErrors} — ${err.message}`);
@@ -166,6 +281,9 @@ async function childDatabaseToMarkdownTable(block, ctx, titleForErrors) {
   let rows;
   try {
     rows = await notion.queryDatabase(databaseId);
+    for (const row of rows) {
+      addDependency(ctx, row?.id, 'page', row?.last_edited_time || null);
+    }
   } catch (err) {
     stats.errors.push({ title: titleForErrors, error: `Could not query database: ${err.message}` });
     onError(`Could not query database in ${titleForErrors} — ${err.message}`);
@@ -178,7 +296,46 @@ async function childDatabaseToMarkdownTable(block, ctx, titleForErrors) {
   const propEntries = Object.entries(props);
   const titleProp = propEntries.find(([, p]) => p?.type === 'title');
   const otherProps = propEntries.filter(([, p]) => p?.type !== 'title');
-  const ordered = titleProp ? [titleProp, ...otherProps] : otherProps;
+  let ordered = titleProp ? [titleProp, ...otherProps] : otherProps;
+
+  // Pre-fetch relation titles (like convertToCSV does)
+  const relationIds = new Set();
+  for (const row of rows) {
+    const pageProps = row?.properties && typeof row.properties === 'object' ? row.properties : {};
+    for (const [, prop] of Object.entries(pageProps)) {
+      if (prop && prop.type === 'relation' && Array.isArray(prop.relation)) {
+        for (const r of prop.relation) if (r?.id) relationIds.add(r.id);
+      }
+    }
+  }
+
+  const relationTitleCache = await prefetchRelationTitles(relationIds, notion);
+
+  // Helper to convert property to text, with relation resolution
+  function propToText(prop) {
+    if (!prop || prop.type !== 'relation') return pagePropertyToText(prop);
+    if (!Array.isArray(prop.relation)) return '';
+    return prop.relation
+      .map((r) => r?.id && relationTitleCache.has(r.id) ? relationTitleCache.get(r.id) : r?.id)
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  // Sparse column pruning: only keep columns with non-empty data
+  const hasNonEmptyData = new Set();
+  for (const page of rows) {
+    const pageProps = page?.properties && typeof page.properties === 'object' ? page.properties : {};
+    for (const [propName] of ordered) {
+      const text = escapeTableCell(propToText(pageProps[propName]));
+      if (text.trim()) {
+        hasNonEmptyData.add(propName);
+      }
+    }
+  }
+  // Filter to only columns with data (or keep all if no data found, for structure)
+  if (hasNonEmptyData.size > 0) {
+    ordered = ordered.filter(([propName]) => hasNonEmptyData.has(propName));
+  }
 
   const colNames = ordered.map(([name]) => name);
   if (colNames.length === 0) return '';
@@ -189,12 +346,14 @@ async function childDatabaseToMarkdownTable(block, ctx, titleForErrors) {
 
   for (const page of rows) {
     const pageProps = page?.properties && typeof page.properties === 'object' ? page.properties : {};
-    const cells = ordered.map(([name]) => escapeTableCell(pagePropertyToText(pageProps[name])));
+    const cells = ordered.map(([name]) => escapeTableCell(propToText(pageProps[name])));
     bodyLines.push(`| ${cells.join(' | ')} |`);
   }
 
   const title = block?.child_database?.title || db?.title?.map((t) => t.plain_text).join('') || 'Database';
-  const out = [`\n\n### ${title}\n\n`, header, divider, ...bodyLines, '\n\n'].join('\n');
+  const out = includeHeading
+    ? [`\n\n### ${title}\n\n`, header, divider, ...bodyLines, '\n\n'].join('\n')
+    : [`\n\n`, header, divider, ...bodyLines, '\n\n'].join('\n');
   return normalizeSpacing(out);
 }
 
@@ -202,6 +361,16 @@ async function resolveSyncedBlockChildren(block, ctx, titleForErrors) {
   const { notion, stats, onError } = ctx;
   const synced = block?.synced_block;
   if (!synced) return [];
+
+  const sourceBlockId = synced.synced_from?.block_id || block?.id || null;
+  if (sourceBlockId) {
+    try {
+      const sourceBlock = sourceBlockId === block?.id ? block : await notion.getBlock(sourceBlockId);
+      addDependency(ctx, sourceBlockId, 'block', sourceBlock?.last_edited_time || null);
+    } catch {
+      addDependency(ctx, sourceBlockId, 'block', null);
+    }
+  }
 
   if (!synced.synced_from) {
     // Original synced block, its children should already be inlined by deep fetch.
@@ -240,7 +409,9 @@ async function convertBlockParts(markdownParts, n2m, titleForErrors, stats, onEr
       converted.push(part);
     } else {
       try {
-        const mdBlocks = await n2m.blocksToMarkdown(part.blocks);
+        // Inject sequence numbers to prevent fallback to bullet items
+        const annotatedBlocks = prepareNumberedLists(part.blocks);
+        const mdBlocks = await n2m.blocksToMarkdown(annotatedBlocks);
         const mdResult = n2m.toMarkdownString(mdBlocks);
         converted.push({ type: 'blocks', content: normalizeSpacing(mdResult.parent || '') });
       } catch (err) {
@@ -252,6 +423,18 @@ async function convertBlockParts(markdownParts, n2m, titleForErrors, stats, onEr
   }
 
   return converted;
+}
+
+function addDependency(ctx, id, type, mtime) {
+  if (!ctx || !id) return;
+  if (!Array.isArray(ctx.dependencies)) ctx.dependencies = [];
+  const key = `${type}:${id}`;
+  const existing = ctx.dependencies.find((dep) => `${dep.type}:${dep.id}` === key);
+  if (existing) {
+    if (mtime !== undefined && mtime !== null) existing.mtime = mtime;
+    return;
+  }
+  ctx.dependencies.push({ id, type, mtime: mtime || null });
 }
 
 /**
@@ -292,67 +475,57 @@ function assembleMarkdown(convertedParts, childResults = new Map()) {
 }
 
 async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors, assetsDirForFlatChildren) {
-  const parts = [];
-  let current = [];
+  const items = Array.isArray(blocks) ? blocks : [];
+  const resolved = new Array(items.length);
 
-  async function flush() {
-    if (current.length > 0) {
-      parts.push({ type: 'blocks', blocks: current });
-      current = [];
-    }
-  }
-
-  for (const block of blocks) {
-    if (!block || typeof block !== 'object') continue;
+  async function resolveBlock(block) {
+    if (!block || typeof block !== 'object') return null;
 
     if (block.type === 'synced_block') {
-      await flush();
-      const resolved = await resolveSyncedBlockChildren(block, ctx, titleForErrors);
-      if (resolved.length > 0) {
-        const nested = await blocksToInlineParts(resolved, ctx, visited, depth + 1, titleForErrors, assetsDirForFlatChildren);
-        parts.push(...nested);
-      }
-      continue;
+      ctx.foundSyncedBlocks = true;
+      const nested = await resolveSyncedBlockChildren(block, ctx, titleForErrors);
+      if (nested.length === 0) return null;
+      const nestedParts = await blocksToInlineParts(nested, ctx, visited, depth + 1, titleForErrors, assetsDirForFlatChildren);
+      return { type: 'parts', parts: nestedParts };
     }
 
     if (block.type === 'child_database') {
-      await flush();
       const table = await childDatabaseToMarkdownTable(block, ctx, titleForErrors);
-      if (table.trim()) parts.push({ type: 'raw', content: table });
-      continue;
+      if (table.trim()) return { type: 'parts', parts: [{ type: 'raw', content: table }] };
+      return null;
     }
 
-    if (block.type === 'child_page' && ctx.flat) {
-      await flush();
-
+    if (block.type === 'child_page' && ctx.format === 'flattened') {
       const childPageId = block.id;
       const childTitle = block.child_page?.title || 'Untitled';
-
-      if (!childPageId) continue;
-      if (visited.has(childPageId)) continue;
+      if (!childPageId) return null;
+      if (visited.has(childPageId)) return null;
 
       visited.add(childPageId);
 
-      let childBlocks = [];
-      try {
-        const result = await ctx.notion.getBlockChildrenDeep(childPageId);
-        childBlocks = result.blocks;
-        for (const w of result.warnings) {
-          ctx.stats.errors.push({ title: childTitle, error: `Skipped block ${w.blockType}: ${w.error}` });
-          ctx.onError(`Partial fetch in ${childTitle}: skipped ${w.blockType} block — ${w.error}`);
-        }
-      } catch (err) {
-        ctx.stats.errors.push({ title: childTitle, error: `Could not fetch blocks: ${err.message}` });
-        ctx.onError(`Could not fetch: ${childTitle} — ${err.message}`);
-        continue;
+      const [pageResult, childResult] = await Promise.allSettled([
+        ctx.notion.getPage(childPageId),
+        ctx.notion.getBlockChildrenDeep(childPageId),
+      ]);
+
+      addDependency(ctx, childPageId, 'page', pageResult.status === 'fulfilled' ? pageResult.value?.last_edited_time || null : null);
+
+      if (childResult.status !== 'fulfilled') {
+        ctx.stats.errors.push({ title: childTitle, error: `Could not fetch blocks: ${childResult.reason?.message || 'Unknown error'}` });
+        ctx.onError(`Could not fetch: ${childTitle} — ${childResult.reason?.message || 'Unknown error'}`);
+        return null;
       }
 
-      const childParts = await blocksToInlineParts(childBlocks, ctx, visited, depth + 1, childTitle, assetsDirForFlatChildren);
+      const result = childResult.value;
+      for (const w of result.warnings) {
+        ctx.stats.errors.push({ title: childTitle, error: `Skipped block ${w.blockType}: ${w.error}` });
+        ctx.onError(`Partial fetch in ${childTitle}: skipped ${w.blockType} block — ${w.error}`);
+      }
+
+      const childParts = await blocksToInlineParts(result.blocks || [], ctx, visited, depth + 1, childTitle, assetsDirForFlatChildren);
       const converted = await convertBlockParts(childParts, ctx.n2m, childTitle, ctx.stats, ctx.onError);
       let childMarkdown = normalizeSpacing(assembleMarkdown(converted, new Map())).trim();
 
-      // In flat mode, still download/rewire assets for inlined sub-pages.
-      // Assets are stored under the current page's directory (same output file context).
       try {
         if (assetsDirForFlatChildren) {
           const processed = await processAssets(childMarkdown, assetsDirForFlatChildren, ctx.stats, ctx);
@@ -363,27 +536,58 @@ async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors, 
         ctx.onError(`Asset processing failed in ${childTitle} — ${err.message}`);
       }
 
+      const sanitizedSlug = childTitle.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      const anchorBase = `#sub-page-${sanitizedSlug}`;
+      let anchorId = anchorBase;
+      let suffix = 2;
+      while (ctx.anchorMap && Array.from(ctx.anchorMap.values()).includes(anchorId)) {
+        anchorId = `${anchorBase}-${suffix}`;
+        suffix += 1;
+      }
+      if (ctx.anchorMap) {
+        ctx.anchorMap.set(childPageId, anchorId);
+      }
+
       const wrapped =
-        `<!-- pagesdown:subpage:start -->\n` +
+        `<!-- notiondrive:subpage:start -->${anchorId}\n` +
         `### Sub-Page Content: ${childTitle}\n\n` +
         (childMarkdown ? `${childMarkdown}\n\n` : '') +
-        `<!-- pagesdown:subpage:end -->\n\n`;
+        `<!-- notiondrive:subpage:end -->\n\n`;
 
-      parts.push({ type: 'raw', content: wrapped });
-      continue;
+      return { type: 'parts', parts: [{ type: 'raw', content: wrapped }] };
     }
 
-    if (block.type === 'child_page' && !ctx.flat) {
-      // Keep legacy behavior: split out a link + recursion.
-      // This is handled by the existing boundary splitter.
-      current.push(block);
-      continue;
+    if (block.type === 'child_page' && ctx.format !== 'flattened') {
+      return { type: 'block', block };
     }
 
-    current.push(block);
+    return { type: 'block', block };
   }
 
-  await flush();
+  await runWithConcurrency(items.map((block, index) => ({ block, index })), BLOCK_CONCURRENCY, async ({ block, index }) => {
+    resolved[index] = await resolveBlock(block);
+  });
+
+  const parts = [];
+  let current = [];
+  for (const entry of resolved) {
+    if (!entry) continue;
+    if (entry.type === 'block') {
+      current.push(entry.block);
+      continue;
+    }
+    if (current.length > 0) {
+      parts.push({ type: 'blocks', blocks: current });
+      current = [];
+    }
+    if (Array.isArray(entry.parts)) {
+      parts.push(...entry.parts);
+    }
+  }
+  if (current.length > 0) {
+    parts.push({ type: 'blocks', blocks: current });
+  }
+
   return parts;
 }
 
@@ -395,7 +599,7 @@ async function blocksToInlineParts(blocks, ctx, visited, depth, titleForErrors, 
  *   onLog(message)     – milestone log line (page saved, db started, etc.)
  *   onError(message)   – error log line (shown immediately, not batched)
  */
-export async function downloadPages(selectedItems, savePath, notion, { onStatus, onLog, onError }, { flat = false } = {}) {
+export async function downloadPages(selectedItems, savePath, notion, { onStatus, onLog, onError }, { format = 'markdown-tree', debug = false, frontmatter = false } = {}) {
   await ensureDir(savePath);
 
   const n2m = new NotionToMarkdown({
@@ -407,29 +611,50 @@ export async function downloadPages(selectedItems, savePath, notion, { onStatus,
   });
 
   const stats = { totalPages: 0, totalAssets: 0, errors: [] };
-  const ctx = { notion, n2m, stats, onStatus, onLog, onError, flat };
+  // Track files written to disk so callers can inspect outputs
+  stats.writtenFiles = [];
+  const anchorMap = format === 'flattened' ? new Map() : null; // Track page IDs to anchor slugs in flat mode
+  const ctx = { notion, n2m, stats, onStatus, onLog, onError, format, anchorMap, debug, frontmatter, foundSyncedBlocks: false, dependencies: [] };
   const usedNames = new Set();
   const visited = new Set();
 
   for (let i = 0; i < selectedItems.length; i++) {
+    // Reset synced block flag for each item
+    ctx.foundSyncedBlocks = false;
     const item = selectedItems[i];
-    const safeName = uniqueFilename(sanitizeFilename(item.title), usedNames);
+    const displayTitle = item.title || item.name || item.id || 'Untitled';
+    // Use custom filename if provided; preserve the exact string as much as possible
+    // but remove any path separators or illegal control characters. Only fall
+    // back to sanitization for generated titles.
+    let safeName;
+    if (item.customFilename) {
+      // Strip directory parts and dangerous characters but keep user intent (hyphens, multiple dashes)
+      const base = path.basename(String(item.customFilename));
+      const cleaned = base.replace(/[<>:"|?*\x00-\x1f]/g, '');
+      safeName = uniqueFilename(cleaned || 'Untitled', usedNames);
+    } else {
+      safeName = uniqueFilename(sanitizeFilename(displayTitle), usedNames);
+    }
     const prefix = `[${i + 1}/${selectedItems.length}]`;
 
-    onLog(`${prefix} Starting: ${item.title}`);
+    onLog(`${prefix} Starting: ${displayTitle}`);
 
     try {
       if (item.type === 'database') {
-        await downloadDatabase(item.id, safeName, savePath, ctx, visited, 0);
+        await downloadDatabase(item.id, safeName, savePath, ctx, visited, 0, !!item.customFilename);
       } else {
-        await downloadPage(item.id, safeName, savePath, ctx, visited, 0, true);
+        await downloadPage(item.id, safeName, savePath, ctx, visited, 0, true, !!item.customFilename);
       }
-      onLog(`${prefix} Done: ${item.title} (${stats.totalPages} pages, ${stats.totalAssets} assets so far)`);
+      onLog(`${prefix} Done: ${displayTitle} (${stats.totalPages} pages, ${stats.totalAssets} assets so far)`);
     } catch (err) {
       stats.errors.push({ title: item.title, error: err.message });
       onError(`${prefix} Failed: ${item.title} — ${err.message}`);
     }
   }
+
+  // Transfer dependency and synced block state to stats for ledger updates
+  stats.foundSyncedBlocks = ctx.foundSyncedBlocks || false;
+  stats.dependencies = Array.isArray(ctx.dependencies) ? ctx.dependencies : [];
 
   return stats;
 }
@@ -440,7 +665,7 @@ export async function downloadPages(selectedItems, savePath, notion, { onStatus,
  *   1. Passes them to notion-to-md for markdown conversion (no extra API calls)
  *   2. Extracts child_page/child_database blocks for recursion
  */
-async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopLevel = false) {
+async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopLevel = false, isCustomFilename = false) {
   if (visited.has(pageId)) return { isLeaf: true };
   if (depth > MAX_DEPTH) {
     ctx.stats.errors.push({ title: name, error: `Skipped: exceeded max depth of ${MAX_DEPTH}` });
@@ -472,9 +697,21 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
     let content = '';
     try {
       const page = await notion.getPage(pageId);
-      const frontmatter = buildFrontmatter(page.properties);
-      if (frontmatter) {
-        content += `---\n${frontmatter}---\n\n`;
+      let frontmatterBody = '';
+      if (ctx.frontmatter === true) {
+        frontmatterBody = buildFrontmatter(page.properties);
+      } else if (typeof ctx.frontmatter === 'string') {
+        const prop = page.properties?.[ctx.frontmatter];
+        if (prop) {
+          const rawText = pagePropertyToText(prop);
+          if (rawText.trim()) {
+            frontmatterBody = rawText.endsWith('\n') ? rawText : `${rawText}\n`;
+          }
+        }
+      }
+
+      if (frontmatterBody) {
+        content += `---\n${frontmatterBody}---\n\n`;
       }
     } catch {
       // Page metadata also inaccessible — continue with bare stub
@@ -489,10 +726,35 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
 
   onStatus(`Converting: ${name} (${blocks.length} blocks)`);
 
+  // If the desired output filename has a code extension, extract raw code
+  // blocks and write them directly as a plain code file (no markdown).
+  try {
+    const extension = ctx.format === 'csv' ? '.csv' : '.md';
+    const desiredFilename = isCustomFilename ? name : `${slugifyFilename(name)}${extension}`;
+    const ext = path.extname(desiredFilename).toLowerCase();
+    const codeExts = new Set(['.js', '.ts', '.py', '.sh', '.json', '.yml', '.yaml', '.sql']);
+    if (codeExts.has(ext)) {
+      // Collect Notion code blocks and extract plain text content
+      const codeBlocks = Array.isArray(blocks) ? blocks.filter((b) => b && b.type === 'code') : [];
+      const snippets = codeBlocks.map((b) => notionRichTextToPlain(b.code && b.code.rich_text));
+      const outContent = snippets.join('\n\n');
+      // Ensure parent directory exists and write raw code file
+      await ensureDir(parentDir);
+      const outPath = path.join(parentDir, desiredFilename);
+      await writeFile(outPath, outContent, 'utf-8');
+      stats.writtenFiles.push(outPath);
+      stats.totalPages++;
+      if (ctx.onLog) ctx.onLog(`Wrote code file: ${outPath}`);
+      return { isLeaf: true };
+    }
+  } catch (err) {
+    // Non-fatal: fall back to regular markdown flow on any failure
+  }
+
   let markdownParts;
   let childEntries;
 
-  if (ctx.flat) {
+  if (ctx.format === 'flattened') {
     // In flat mode, assets for this whole document (and any inlined sub-pages)
     // should live alongside the single output markdown file.
     markdownParts = await blocksToInlineParts(blocks, ctx, visited, depth, name, parentDir);
@@ -532,41 +794,45 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
     .join('');
   const hasImages = hasExternalImages(blockContent);
 
-  // A page is a leaf if it has no children and no images
-  // Top-level pages always keep their folder
-  const isLeaf = !isTopLevel && childEntries.length === 0 && !hasImages;
+  // A page is a leaf if it has no children and no images (applies to all pages)
+  const isLeaf = childEntries.length === 0 && !hasImages;
 
   // Decide directory structure
+  // If custom filename: use as-is (user controls extension)
+  // Otherwise: slugify and add .md extension (backward compat)
+  const extension = ctx.format === 'csv' ? '.csv' : '.md';
+  const filename = isCustomFilename ? name : `${slugifyFilename(name)}${extension}`;
+  const slugName = slugifyFilename(name); // Still need slugName for folder creation
   let pageDir, mdPath;
-  if (ctx.flat) {
+  if (ctx.format === 'flattened') {
     // Flat mode always writes a single markdown file at parentDir level.
-    mdPath = path.join(parentDir, `${name}.md`);
+    mdPath = path.join(parentDir, filename);
     pageDir = parentDir;
   } else if (isLeaf) {
-    mdPath = path.join(parentDir, `${name}.md`);
+    mdPath = path.join(parentDir, filename);
     pageDir = parentDir;
   } else {
-    pageDir = path.join(parentDir, name);
+    pageDir = path.join(parentDir, slugName);
     await ensureDir(pageDir);
-    mdPath = path.join(pageDir, `${name}.md`);
+    mdPath = path.join(pageDir, filename);
   }
 
   // Recurse into children BEFORE writing parent (to get leaf status for links)
   const childResults = new Map();
-  if (!ctx.flat && childEntries.length > 0) {
+  if (ctx.format !== 'flattened' && childEntries.length > 0) {
     const pageCount = childEntries.filter((e) => e.type === 'page').length;
     const dbCount = childEntries.filter((e) => e.type === 'database').length;
     onStatus(`${name}: ${pageCount} sub-pages, ${dbCount} sub-databases`);
   }
 
-  if (!ctx.flat) {
+  if (ctx.format !== 'flattened') {
     for (const entry of childEntries) {
       try {
         let result;
         if (entry.type === 'page') {
-          result = await downloadPage(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
+          result = await downloadPage(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1, false);
         } else {
-          result = await downloadDatabase(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1);
+          result = await downloadDatabase(entry.block.id, entry.name, pageDir, ctx, visited, depth + 1, false);
         }
         childResults.set(entry.name, result || { isLeaf: false });
       } catch (err) {
@@ -577,8 +843,33 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
     }
   }
 
-  // Assemble final markdown with correct links based on child leaf status
-  let markdown = `# ${name}\n\n` + assembleMarkdown(convertedParts, childResults);
+  // Before writing markdown, extract and prepend frontmatter if configured
+  let frontmatterBody = '';
+  if (ctx.frontmatter === true || typeof ctx.frontmatter === 'string') {
+    try {
+      const page = await notion.getPage(pageId);
+      if (ctx.frontmatter === true) {
+        frontmatterBody = buildFrontmatter(page.properties);
+      } else {
+        const prop = page.properties?.[ctx.frontmatter];
+        if (prop) {
+          const rawText = pagePropertyToText(prop);
+          if (rawText.trim()) {
+            frontmatterBody = rawText.endsWith('\n') ? rawText : `${rawText}\n`;
+          }
+        }
+      }
+    } catch (err) {
+      if (ctx.debug) console.error(`[DEBUG] Failed to fetch page properties for frontmatter: ${err.message}`);
+    }
+  }
+
+  // Assemble final markdown with the conditional frontmatter block
+  let markdown = '';
+  if (frontmatterBody) {
+    markdown += `---\n${frontmatterBody}---\n\n`;
+  }
+  markdown += `# ${name}\n\n` + assembleMarkdown(convertedParts, childResults);
 
   if (!markdown.trim()) {
     markdown = `# ${name}\n`;
@@ -588,7 +879,18 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
   // doesn't contain expiring external URLs.
   markdown = await processAssets(markdown, pageDir, stats, ctx);
 
+  // In flat mode, rewrite internal links to inlined sub-pages to use anchor references
+  if (ctx.format === 'flattened' && ctx.anchorMap && ctx.anchorMap.size > 0) {
+    // Rewrite markdown links [text](pageId) or [text](pageId.md) to anchor references
+    for (const [pageId, anchor] of ctx.anchorMap.entries()) {
+      // Match both bare IDs and ID.md format
+      const idRegex = new RegExp(`\\]\\(${pageId}(?:\\.md)?\\)`, 'g');
+      markdown = markdown.replace(idRegex, `](${anchor})`);
+    }
+  }
+
   await writeFile(mdPath, markdown, 'utf-8');
+  stats.writtenFiles.push(mdPath);
   stats.totalPages++;
 
   return { isLeaf };
@@ -597,7 +899,7 @@ async function downloadPage(pageId, name, parentDir, ctx, visited, depth, isTopL
 /**
  * Download a database: create a folder and download each row as a page.
  */
-async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth) {
+async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth, isCustomFilename = false) {
   if (visited.has(databaseId)) return;
   if (depth > MAX_DEPTH) {
     ctx.stats.errors.push({ title: name, error: `Skipped: exceeded max depth of ${MAX_DEPTH}` });
@@ -606,8 +908,8 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
   visited.add(databaseId);
 
   const { notion, n2m, stats, onStatus, onLog, onError } = ctx;
-  const dbDir = path.join(parentDir, name);
-  await ensureDir(dbDir);
+  const slugName = slugifyFilename(name);
+  const dbDir = path.join(parentDir, slugName);
 
   onStatus(`Querying database: ${name}`);
 
@@ -621,6 +923,54 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
   }
 
   onLog(`Database "${name}": ${rows.length} row${rows.length === 1 ? '' : 's'}`);
+
+  // CSV mode: write one file at parentDir and skip per-row recursion/files.
+  if (ctx.format === 'csv') {
+    let ordered = [];
+    try {
+      const db = await notion.getDatabase(databaseId);
+      const props = db?.properties && typeof db.properties === 'object' ? db.properties : {};
+      const propEntries = Object.entries(props);
+      const titleProp = propEntries.find(([, p]) => p?.type === 'title');
+      const otherProps = propEntries.filter(([, p]) => p?.type !== 'title');
+      ordered = titleProp ? [titleProp, ...otherProps] : otherProps;
+    } catch {
+      ordered = [];
+    }
+
+    const csv = await convertToCSV(rows, ordered, notion);
+    await ensureDir(parentDir);
+    // If custom filename: use as-is (user controls extension)
+    // Otherwise: slugify and add .csv extension (backward compat)
+    const csvFilename = isCustomFilename ? name : `${slugifyFilename(name)}.csv`;
+    const csvPath = path.join(parentDir, csvFilename);
+    try {
+      await writeFile(csvPath, csv, 'utf-8');
+      stats.writtenFiles.push(csvPath);
+      onLog(`Wrote CSV: ${csvPath}`);
+    } catch (err) {
+      stats.errors.push({ title: name, error: `Could not write CSV: ${err.message}` });
+      onError(`Could not write CSV for ${name} — ${err.message}`);
+    }
+    return { isLeaf: false };
+  }
+
+  // Flat markdown database export: write a single file with the database table only.
+  if (ctx.format === 'flattened') {
+    await ensureDir(parentDir);
+    const block = { id: databaseId, child_database: { title: name } };
+    const table = await childDatabaseToMarkdownTable(block, ctx, name, { includeHeading: false });
+    const extension = ctx.format === 'csv' ? '.csv' : '.md';
+    const filename = isCustomFilename ? name : `${slugifyFilename(name)}${extension}`;
+    const mdPath = path.join(parentDir, filename);
+    const content = `# ${name}\n\n${table}`;
+    await writeFile(mdPath, content, 'utf-8');
+    stats.writtenFiles.push(mdPath);
+    stats.totalPages++;
+    return { isLeaf: true };
+  }
+
+  await ensureDir(dbDir);
 
   const rowNames = new Set();
   const rowLinks = [];
@@ -640,7 +990,18 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
     rowLinks.push({ title: rowTitle, name: rowName });
 
     try {
-      const frontmatter = buildFrontmatter(row.properties);
+      let frontmatterBody = '';
+      if (ctx.frontmatter === true) {
+        frontmatterBody = buildFrontmatter(row.properties);
+      } else if (typeof ctx.frontmatter === 'string') {
+        const prop = row.properties?.[ctx.frontmatter];
+        if (prop) {
+          const rawText = pagePropertyToText(prop);
+          if (rawText.trim()) {
+            frontmatterBody = rawText.endsWith('\n') ? rawText : `${rawText}\n`;
+          }
+        }
+      }
 
       // Fetch blocks through throttled wrapper
       let blocks;
@@ -683,9 +1044,9 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
         try {
           let result;
           if (entry.type === 'page') {
-            result = await downloadPage(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1);
+            result = await downloadPage(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1, false);
           } else {
-            result = await downloadDatabase(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1);
+            result = await downloadDatabase(entry.block.id, entry.name, rowDir, ctx, visited, depth + 1, false);
           }
           childResults.set(entry.name, result || { isLeaf: false });
         } catch (err) {
@@ -699,8 +1060,8 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
       const markdown = assembleMarkdown(convertedParts, childResults);
 
       let content = '';
-      if (frontmatter) {
-        content += `---\n${frontmatter}---\n\n`;
+      if (frontmatterBody) {
+        content += `---\n${frontmatterBody}---\n\n`;
       }
       content += `# ${rowName}\n\n${markdown}`;
 
@@ -712,6 +1073,7 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
         ? path.join(dbDir, `${rowName}.md`)
         : path.join(rowDir, `${rowName}.md`);
       await writeFile(mdPath, content, 'utf-8');
+      stats.writtenFiles.push(mdPath);
       stats.totalPages++;
     } catch (err) {
       stats.errors.push({ title: rowTitle, error: err.message });
@@ -730,6 +1092,7 @@ async function downloadDatabase(databaseId, name, parentDir, ctx, visited, depth
   }
   const indexPath = path.join(dbDir, `${name}.md`);
   await writeFile(indexPath, indexLines.join('\n') + '\n', 'utf-8');
+  stats.writtenFiles.push(indexPath);
 
   return { isLeaf: false };
 }
@@ -746,8 +1109,7 @@ async function processAssets(markdown, pageDir, stats, ctx) {
   const replacements = new Map();
   const downloads = [];
 
-  let match;
-  while ((match = imageRegex.exec(markdown)) !== null) {
+  for (const match of markdown.matchAll(imageRegex)) {
     const [full, alt, url] = match;
 
     if (url.startsWith('data:') || !url.startsWith('http')) continue;
@@ -765,19 +1127,33 @@ async function processAssets(markdown, pageDir, stats, ctx) {
 
   // Download assets with bounded concurrency (CDN, not Notion API — no rate limit)
   let completed = 0;
-  await runWithConcurrency(downloads, ASSET_CONCURRENCY, async (dl) => {
-    try {
+  const downloadControllers = new Map();
+
+  try {
+    await runWithConcurrency(downloads, ASSET_CONCURRENCY, async (dl) => {
       const assetPath = path.join(assetsDir, dl.filename);
-      await downloadFile(dl.url, assetPath);
-      stats.totalAssets++;
-      replacements.set(dl.fullMatch, `![${dl.alt}](./assets/${dl.filename})`);
-    } catch (err) {
-      ctx.onError(`Asset failed: ${dl.filename} — ${err.message}`);
-    } finally {
-      completed++;
-      ctx.onStatus(`Assets: ${completed}/${downloads.length}`);
+      const controller = new AbortController();
+      downloadControllers.set(dl.filename, controller);
+      try {
+        await downloadFile(dl.url, assetPath, { parentSignal: controller.signal });
+        stats.totalAssets++;
+        replacements.set(dl.fullMatch, `![${dl.alt}](./assets/${dl.filename})`);
+      } catch (err) {
+        ctx.onError(`Asset failed: ${dl.filename} — ${err.message}`);
+      } finally {
+        downloadControllers.delete(dl.filename);
+        completed++;
+        ctx.onStatus(`Assets: ${completed}/${downloads.length}`);
+      }
+    });
+  } catch (err) {
+    // Ensure any in-flight downloads are aborted so there are no lingering
+    // network handles or background work (addresses orphaned resource reports).
+    for (const ctrl of downloadControllers.values()) {
+      try { ctrl.abort(); } catch (e) {}
     }
-  });
+    throw err;
+  }
 
   if (replacements.size === 0) return markdown;
 
@@ -787,74 +1163,61 @@ async function processAssets(markdown, pageDir, stats, ctx) {
 }
 
 /**
- * Check if a URL is safe to fetch (not a private/internal address).
- */
-function isAllowedUrl(url) {
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname;
-
-    if (BLOCKED_HOSTNAMES.has(hostname)) return false;
-    if (PRIVATE_IP_PREFIXES.some((prefix) => hostname.startsWith(prefix))) return false;
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Run async tasks with bounded concurrency.
  */
 async function runWithConcurrency(items, limit, fn) {
   let index = 0;
+  let stopped = false;
+  const errors = [];
 
   async function worker() {
-    while (index < items.length) {
+    while (!stopped && index < items.length) {
       const item = items[index++];
-      await fn(item);
+      try {
+        await fn(item);
+      } catch (err) {
+        // Signal other workers to stop and capture error for re-throwing
+        stopped = true;
+        errors.push(err);
+        break;
+      }
     }
   }
 
   const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
   await Promise.all(workers);
+  if (errors.length) throw errors[0];
 }
 
 /**
  * Download a file from a URL to a local path with timeout.
  */
-async function downloadFile(url, destPath) {
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-  });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  // Early reject if Content-Length is known and too large
-  const contentLength = parseInt(response.headers.get('content-length'), 10);
-  if (contentLength > MAX_ASSET_SIZE) {
-    throw new Error(`File too large (${Math.round(contentLength / 1024 / 1024)}MB, limit ${MAX_ASSET_SIZE / 1024 / 1024}MB)`);
-  }
-
-  // Stream and count bytes to enforce limit even without Content-Length
-  const reader = response.body.getReader();
-  const chunks = [];
-  let totalBytes = 0;
-
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    totalBytes += value.length;
-    if (totalBytes > MAX_ASSET_SIZE) {
-      reader.cancel();
-      throw new Error(`File too large (exceeded ${MAX_ASSET_SIZE / 1024 / 1024}MB during download)`);
+async function downloadFile(url, destPath, { parentSignal } = {}) {
+  const controller = new AbortController();
+  let parentListener = null;
+  if (parentSignal) {
+    if (parentSignal.aborted) controller.abort();
+    else {
+      parentListener = () => controller.abort();
+      try { parentSignal.addEventListener('abort', parentListener, { once: true }); } catch (e) {}
     }
-    chunks.push(value);
   }
 
-  await writeFile(destPath, Buffer.concat(chunks));
+  const timeoutId = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+
+  try {
+    if (!isAllowedUrl(url)) {
+      throw new Error('Disallowed URL');
+    }
+    await downloadToPath(url, destPath, { parentSignal: controller.signal, retries: 2, backoff: 150, timeoutMs: DOWNLOAD_TIMEOUT_MS, maxSize: MAX_ASSET_SIZE });
+  } catch (err) {
+    throw wrapError(`Failed to download ${url} — ${err && err.message ? err.message : String(err)}`, err);
+  } finally {
+    clearTimeout(timeoutId);
+    if (parentSignal && parentListener) {
+      try { parentSignal.removeEventListener('abort', parentListener); } catch (e) {}
+    }
+  }
 }
 
 /**

@@ -170,8 +170,44 @@ export function uniqueFilename(name, existingNames) {
 }
 
 /**
+ * Convert a title to a web-safe, LLM-friendly slug for filenames.
+ * Converts to lowercase, replaces spaces/underscores with hyphens,
+ * strips all non-alphanumeric characters except hyphens.
+ * Example: "🚀 Project Alpha & Beta (2026)!" → "project-alpha-beta-2026"
+ */
+export function slugifyFilename(title) {
+  if (!title || !title.trim()) {
+    return 'untitled';
+  }
+
+  return title
+    .toLowerCase()                    // Lowercase
+    .replace(/[\s_]+/g, '-')         // Replace spaces and underscores with hyphens
+    .replace(/[^a-z0-9-]/g, '')      // Strip non-alphanumeric except hyphens
+    .replace(/-{2,}/g, '-')          // Collapse multiple hyphens
+    .replace(/^-|-$/g, '');          // Trim leading/trailing hyphens
+}
+
+/**
  * Recursively create a directory if it doesn't exist.
  */
 export async function ensureDir(dirPath) {
   await mkdir(dirPath, { recursive: true });
+}
+
+/**
+ * Safely merge plain objects into a new object while blocking prototype-pollution
+ * keys like __proto__, constructor, and prototype. Only copies own enumerable
+ * properties from source objects.
+ */
+export function safeMerge(...sources) {
+  const out = {};
+  for (const src of sources) {
+    if (!src || typeof src !== 'object') continue;
+    for (const key of Object.keys(src)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+      out[key] = src[key];
+    }
+  }
+  return out;
 }

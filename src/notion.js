@@ -1,4 +1,5 @@
 import { Client, LogLevel } from '@notionhq/client';
+import { extractTitle, extractDatabaseTitle } from './notion-helpers.js';
 
 /**
  * Thin wrapper around the Notion API with built-in rate limiting and pagination.
@@ -8,6 +9,8 @@ export class NotionClient {
     this.client = new Client({ auth: token, logLevel: LogLevel.ERROR });
     this._queue = Promise.resolve();
     this._minInterval = 340; // ~3 req/s with margin
+    this._pending = 0; // number of requests currently queued/in-flight
+    this._maxPending = 200; // safety cap to avoid unbounded queue growth
   }
 
   /**
@@ -15,11 +18,30 @@ export class NotionClient {
    * Uses a promise chain to ensure mutual exclusion (no concurrent requests).
    */
   _throttledCall(fn) {
-    this._queue = this._queue.catch(() => {}).then(async () => {
-      await new Promise((r) => setTimeout(r, this._minInterval));
-      return fn();
+    if (this._pending > this._maxPending) {
+      return Promise.reject(new Error('Notion request queue overloaded'));
+    }
+    this._pending++;
+    const previousQueue = this._queue;
+    // Schedule this slot's delay relative to the previous request's dispatch time
+    let timerId;
+    const executionSlot = previousQueue.catch(() => {}).then(() => {
+      return new Promise((resolve) => {
+        // store timer id so static analysis tools can reason about lifecycle
+        timerId = setTimeout(resolve, this._minInterval);
+      });
     });
-    return this._queue;
+    // Advance the queue tracking pointer immediately to let the next request schedule its delay
+    // Attach a catch to the queue pointer to avoid unhandled rejections from the queue chain
+    this._queue = executionSlot.catch(() => {});
+    // Execute the network function independently when its slot arrives
+    const exec = executionSlot.then(() => fn());
+    return exec.finally(() => {
+      try {
+        if (typeof timerId !== 'undefined') clearTimeout(timerId);
+      } catch (e) {}
+      this._pending--;
+    });
   }
 
   /**
@@ -148,12 +170,14 @@ export class NotionClient {
           id: item.id,
           type: 'page',
           title: extractTitle(item),
+          hasChildren: Boolean(item.has_children),
         });
       } else if (item.object === 'database') {
         topLevel.push({
           id: item.id,
           type: 'database',
           title: extractDatabaseTitle(item),
+          hasChildren: false,
         });
       }
     }
@@ -184,10 +208,9 @@ export class NotionClient {
    */
   async getBlockChildrenDeep(blockId, depth = 0, warnings = []) {
     const blocks = await this.getBlockChildren(blockId);
-
-    if (depth >= 15) return { blocks, warnings }; // Safety valve for pathological nesting
-
-    for (const block of blocks) {
+    if (depth >= 15) return { blocks, warnings };
+    
+    const tasks = blocks.map(async (block) => {
       if (block.has_children && block.type !== 'child_page' && block.type !== 'child_database') {
         try {
           const result = await this.getBlockChildrenDeep(block.id, depth + 1, warnings);
@@ -197,8 +220,9 @@ export class NotionClient {
           warnings.push({ blockId: block.id, blockType: block.type, error: err.message });
         }
       }
-    }
-
+    });
+    
+    await Promise.all(tasks);
     return { blocks, warnings };
   }
 
@@ -212,26 +236,20 @@ export class NotionClient {
 
     const self = this;
     this._throttledClient = new Proxy(this.client, {
-      get(target, prop) {
-        if (prop === 'blocks') {
-          return new Proxy(target.blocks, {
-            get(blocksTarget, blocksProp) {
-              if (blocksProp === 'children') {
-                return new Proxy(blocksTarget.children, {
-                  get(childrenTarget, childrenProp) {
-                    if (childrenProp === 'list') {
-                      return (args) => self._throttledCall(() => childrenTarget.list(args));
-                    }
-                    return childrenTarget[childrenProp];
-                  },
-                });
-              }
-              return blocksTarget[blocksProp];
-            },
-          });
-        }
-        return target[prop];
-      },
+      get: (target, prop) =>
+        prop === 'blocks'
+          ? new Proxy(target.blocks, {
+              get: (blocksTarget, blocksProp) =>
+                blocksProp === 'children'
+                  ? new Proxy(blocksTarget.children, {
+                      get: (childrenTarget, childrenProp) =>
+                        childrenProp === 'list'
+                          ? (args) => self._throttledCall(() => childrenTarget.list(args))
+                          : childrenTarget[childrenProp],
+                    })
+                  : blocksTarget[blocksProp],
+            })
+          : target[prop],
     });
 
     return this._throttledClient;
@@ -260,6 +278,15 @@ export class NotionClient {
   }
 
   /**
+   * Retrieve a single block's properties.
+   */
+  async getBlock(blockId) {
+    return this._throttledCall(() =>
+      this.client.blocks.retrieve({ block_id: blockId })
+    );
+  }
+
+  /**
    * Retrieve a single page's properties.
    */
   async getPage(pageId) {
@@ -267,29 +294,62 @@ export class NotionClient {
       this.client.pages.retrieve({ page_id: pageId })
     );
   }
-}
 
-/**
- * Extract a page's title from its properties.
- */
-export function extractTitle(page) {
-  if (!page.properties) return 'Untitled';
+  /**
+   * Delete all top-level block children of a page to clear its content.
+   * Fetches the first tier of blocks and deletes each one.
+   */
+  async clearPageContent(pageId) {
+    try {
+      const blocks = await this.paginate((opts) =>
+        this.client.blocks.children.list({
+          block_id: pageId,
+          page_size: 100,
+          ...opts,
+        })
+      );
 
-  for (const prop of Object.values(page.properties)) {
-    if (prop.type === 'title' && prop.title?.length > 0) {
-      return prop.title.map((t) => t.plain_text).join('');
+      for (const block of blocks) {
+        await this._throttledCall(() =>
+          this.client.blocks.delete({ block_id: block.id })
+        );
+      }
+
+      return blocks.length;
+    } catch (err) {
+      throw new Error(`Failed to clear page content: ${err.message}`);
     }
   }
 
-  return 'Untitled';
+  /**
+   * Append Notion JSON blocks to a page's children.
+   * Batches requests into chunks of 100 blocks to stay within API limits.
+   */
+  async appendPageContent(pageId, blocks) {
+    if (!Array.isArray(blocks) || blocks.length === 0) {
+      return 0;
+    }
+
+    const BATCH_SIZE = 100;
+    let appended = 0;
+
+    try {
+      for (let i = 0; i < blocks.length; i += BATCH_SIZE) {
+        const batch = blocks.slice(i, i + BATCH_SIZE);
+        await this._throttledCall(() =>
+          this.client.blocks.children.append({
+            block_id: pageId,
+            children: batch,
+          })
+        );
+        appended += batch.length;
+      }
+
+      return appended;
+    } catch (err) {
+      throw new Error(`Failed to append page content: ${err.message}`);
+    }
+  }
 }
 
-/**
- * Extract a database's title.
- */
-function extractDatabaseTitle(db) {
-  if (db.title?.length > 0) {
-    return db.title.map((t) => t.plain_text).join('');
-  }
-  return 'Untitled Database';
-}
+export { extractTitle, extractDatabaseTitle };

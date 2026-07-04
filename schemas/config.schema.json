@@ -1,0 +1,208 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "notiondrive config",
+  "type": "object",
+  "properties": {
+    "token": {
+      "type": "string"
+    },
+    "defaultOutputDir": {
+      "type": "string"
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/targetItem"
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "targets"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "markdown-tree",
+              "flattened",
+              "csv"
+            ]
+          },
+          "sync": {
+            "type": "string",
+            "enum": [
+              "pull-only",
+              "push-only",
+              "two-way"
+            ]
+          },
+          "conflict": {
+            "type": "string",
+            "enum": [
+              "local-wins",
+              "notion-wins"
+            ]
+          },
+          "frontmatter": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "source",
+                "path"
+              ],
+              "properties": {
+                "source": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "markdown-tree",
+                    "flattened",
+                    "csv"
+                  ]
+                },
+                "sync": {
+                  "type": "string",
+                  "enum": [
+                    "pull-only",
+                    "push-only",
+                    "two-way"
+                  ]
+                },
+                "conflict": {
+                  "type": "string",
+                  "enum": [
+                    "local-wins",
+                    "notion-wins"
+                  ]
+                },
+                "frontmatter": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "title": {
+                  "type": "string",
+                  "enum": [
+                    "filename",
+                    "relativePath"
+                  ]
+                },
+                "relativePath": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "title": {
+            "type": "string",
+            "enum": [
+              "filename",
+              "relativePath"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "$schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "targetItem": {
+      "type": "object",
+      "required": [
+        "source",
+        "path"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "markdown-tree",
+            "flattened",
+            "csv"
+          ]
+        },
+        "sync": {
+          "type": "string",
+          "enum": [
+            "pull-only",
+            "push-only",
+            "two-way"
+          ]
+        },
+        "conflict": {
+          "type": "string",
+          "enum": [
+            "local-wins",
+            "notion-wins"
+          ]
+        },
+        "frontmatter": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "group": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "enum": [
+            "filename",
+            "relativePath"
+          ]
+        },
+        "relativePath": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

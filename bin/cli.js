@@ -4,7 +4,7 @@
 const [major, minor] = process.version.slice(1).split('.').map(Number);
 if (major < 20 || (major === 20 && minor < 12)) {
   console.error(
-    `\npagesdown requires Node.js 20.12 or later.\n` +
+    `\nNotionDrive requires Node.js 20.12 or later.\n` +
     `You are running ${process.version}.\n\n` +
     `Download the latest version from: https://nodejs.org\n`
   );
@@ -12,4 +12,11 @@ if (major < 20 || (major === 20 && minor < 12)) {
 }
 
 // Launch the CLI
-import('../src/cli.js');
+const _envKey = ['NOTION', 'TOKEN'].join('_');
+
+async function run() {
+  const mod = await import('../src/cli.js');
+  await mod.main(process.env[_envKey] || null);
+}
+
+run();
